@@ -1,0 +1,35 @@
+{
+  "name": "quizbuddy-ai",
+  "version": "0.7.0",
+  "description": "A privacy-first Chrome extension for local screenshot OCR and WebLLM question analysis.",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20",
+    "npm": ">=10"
+  },
+  "keywords": [
+    "chrome-extension",
+    "manifest-v3",
+    "webllm",
+    "webgpu",
+    "tesseract",
+    "ocr",
+    "local-ai"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "check": "node --check background.js && node --check content/content.js && node --check offscreen.js && node --test",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@mlc-ai/web-llm": "0.2.79",
+    "@tesseract.js-data/eng": "1.0.0",
+    "@tesseract.js-data/vie": "1.0.0",
+    "tesseract.js": "6.0.1"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.5"
+  }
+}

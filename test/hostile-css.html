@@ -1,0 +1,31 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>Hostile CSS Fixture</title>
+    <style>
+      *,
+      button,
+      aside,
+      div,
+      section,
+      img {
+        all: unset !important;
+        background: red !important;
+        color: lime !important;
+        display: none !important;
+        font-size: 80px !important;
+        position: static !important;
+        z-index: -1 !important;
+      }
+
+      html,
+      body {
+        display: block !important;
+      }
+    </style>
+  </head>
+  <body>
+    <p>Host page with intentionally destructive global CSS.</p>
+  </body>
+</html>
