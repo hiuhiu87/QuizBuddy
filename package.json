@@ -19,9 +19,11 @@
     "local-ai"
   ],
   "scripts": {
+    "benchmark": "node benchmark/run-benchmark.mjs",
     "build": "node scripts/build.mjs",
-    "check": "node --check background.js && node --check content/content.js && node --check offscreen.js && node --test",
-    "test": "node --test"
+    "check": "node --check background.js && node --check content/content.js && node --check offscreen.js && node --test && node benchmark/run-benchmark.mjs",
+    "test": "node --test",
+    "version:sync": "node scripts/sync-version.mjs"
   },
   "dependencies": {
     "@mlc-ai/web-llm": "0.2.79",

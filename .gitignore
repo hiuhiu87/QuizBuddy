@@ -3,6 +3,7 @@ node_modules/
 
 # Generated extension artifacts
 dist/
+release/
 *.crx
 *.pem
 *.zip
