@@ -4,7 +4,7 @@ Privacy-first Chrome extension for analyzing multiple-choice questions with
 local OCR and browser-based WebLLM inference.
 
 QuizBuddy AI captures a user-selected region of the visible tab, extracts
-Vietnamese or English text with Tesseract.js, and uses a local Qwen2.5 model to
+Vietnamese or English text with Tesseract.js, and uses a selected local Qwen2.5 model to
 produce an answer and learning explanation. It uses no backend, API key, or
 external AI inference API.
 
@@ -19,8 +19,12 @@ model setup, and result-rendering flows are implemented.
 - Vanilla JavaScript, HTML, and CSS
 - Crop-first visible-tab screenshot workflow
 - Browser-local Vietnamese and English OCR
+- Selectable OCR language and editable OCR text
 - Browser-local WebLLM inference through WebGPU
 - Explicit consent before downloading model weights
+- Fast (0.5B) and Balanced (1.5B) local model profiles
+- Model cache status, retry, switching, and deletion controls
+- `Alt+Shift+Q` crop shortcut
 - Full answer text instead of invented A/B/C/D labels
 - Closed Shadow DOM UI isolation
 - No backend, account, API key, analytics, or history
@@ -31,7 +35,7 @@ model setup, and result-rendering flows are implemented.
 - npm 10 or newer
 - Chrome or Edge 116 or newer
 - WebGPU and browser hardware acceleration
-- Approximately 1.63 GB of available GPU memory for the configured model
+- Approximately 945 MB to 1.63 GB of available GPU memory, depending on model
 
 ## Quick Start
 
@@ -54,14 +58,16 @@ The repository root is source code. Always load `dist/` in Chrome.
 
 1. Open a regular `http://` or `https://` page containing a question.
 2. Click the QuizBuddy AI toolbar icon or floating icon.
-3. Review the local model notice.
-4. Click **Download Local Model**.
+3. Select the Fast or Balanced local model.
+4. Review the local model notice and click the download button yourself.
 5. Wait for model setup to complete.
 6. Click **Crop Question**.
 7. Drag over the complete question and its answer choices.
-8. Review the cropped image, OCR text, suggested answer, and explanation.
+8. Correct the OCR text if needed and click **Analyze Again**.
+9. Review the suggested answer and explanation.
 
-Press `Escape` to cancel crop mode.
+Press `Alt+Shift+Q` to start cropping and `Escape` to cancel crop mode. Chrome
+allows changing the shortcut at `chrome://extensions/shortcuts`.
 
 ## Model Download
 
@@ -70,9 +76,13 @@ language data, and the compatible WebLLM runtime are bundled into `dist/`.
 During a source build, the official runtime artifact is downloaded when absent
 and verified against a pinned SHA-256 checksum.
 
-The Qwen2.5 1.5B model weights are approximately 880 MB. They are downloaded
-from the official MLC model repository only after explicit user consent and
-cached by WebLLM in Chrome storage. Inference runs locally after setup.
+The Fast profile uses Qwen2.5 0.5B with lower memory use. The Balanced profile
+uses Qwen2.5 1.5B for better analysis quality. QuizBuddy AI never starts a
+model download automatically. The user must select a model and click its
+download button. Selected model weights are then downloaded from the official
+MLC model repository and cached by WebLLM in Chrome Cache Storage for the
+extension origin. Inference runs locally after setup. The model manager shows
+cache state and can remove the selected model's cached weights.
 
 The model cache belongs to the extension origin:
 
@@ -80,7 +90,10 @@ The model cache belongs to the extension origin:
 chrome-extension://<EXTENSION_ID>
 ```
 
-Removing the extension or clearing its site data may remove the cached model.
+This is not the operating system's `Downloads` folder and is not the
+`vendor/webllm` source directory. Chrome chooses the physical profile/cache
+files and does not expose a stable user-facing filesystem path. Removing the
+extension or clearing its site data may remove the cached model.
 
 ## Architecture
 
@@ -88,6 +101,7 @@ Removing the extension or clearing its site data may remove the cached model.
 Content Script
   - Closed Shadow DOM widget and sidebar
   - Crop selection overlay
+  - OCR language, editable text, and model controls
   - Progress and result rendering
 
 Background Service Worker
@@ -97,8 +111,8 @@ Background Service Worker
 
 Offscreen Document
   - Canvas crop and OCR preprocessing
-  - Vietnamese + English Tesseract.js OCR
-  - WebLLM model setup and inference
+  - Selectable Vietnamese/English Tesseract.js OCR
+  - Multi-model WebLLM setup, cache management, and inference
   - AI JSON validation and normalization
 ```
 
@@ -128,7 +142,10 @@ host element with critical inline `!important` layout declarations.
 
 ## OCR
 
-Tesseract.js loads bundled `vie+eng` language data. The OCR pipeline:
+Tesseract.js loads bundled Vietnamese and English language data. Users can
+choose Vietnamese, English, or combined recognition. `Auto` currently uses the
+combined `vie+eng` worker, which is the safest default for mixed-language
+questions. The OCR pipeline:
 
 1. Adds padding around the crop.
 2. Upscales small captures.
@@ -136,6 +153,9 @@ Tesseract.js loads bundled `vie+eng` language data. The OCR pipeline:
 4. Uses low-impact grayscale and contrast processing to preserve accents.
 5. Retries with color detail when confidence is low.
 6. Normalizes Vietnamese Unicode to NFC.
+
+The extracted text remains editable. **Analyze Again** sends the corrected text
+directly to local WebLLM without recapturing the page or rerunning OCR.
 
 OCR quality still depends on source resolution, font size, contrast, crop
 completeness, and visual noise.
@@ -188,7 +208,8 @@ inspect `chrome://gpu`.
 ### Model setup fails
 
 Check first-run network access, available GPU memory, and the offscreen document
-console from `chrome://extensions`.
+console from `chrome://extensions`. Try the Fast model on lower-memory devices.
+Use **Delete Cache** and download again if a cached model is incomplete.
 
 ### OCR misses Vietnamese accents
 
