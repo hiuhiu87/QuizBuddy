@@ -79,6 +79,47 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === "QB_GENERATE_PRACTICE_LOCAL") {
+    handleLocalTask(message, sender, "QB_OFFSCREEN_GENERATE_PRACTICE")
+      .then(sendResponse)
+      .catch((error) => {
+        sendResponse({
+          ok: false,
+          error: error.message || "Could not generate a practice question."
+        });
+      });
+    return true;
+  }
+
+  if (message.type === "QB_GET_LAST_SCREENSHOT") {
+    handleGetLastScreenshot()
+      .then(sendResponse)
+      .catch((error) => {
+        sendResponse({
+          ok: false,
+          error: error.message || "Could not retrieve the last screenshot."
+        });
+      });
+    return true;
+  }
+
+  if (message.type === "QB_RECROP_LAST_SCREENSHOT") {
+    validateRect(message.rect);
+    handleLocalTask(
+      message,
+      sender,
+      "QB_OFFSCREEN_RECROP_LAST_SCREENSHOT"
+    )
+      .then(sendResponse)
+      .catch((error) => {
+        sendResponse({
+          ok: false,
+          error: error.message || "Could not re-crop the screenshot."
+        });
+      });
+    return true;
+  }
+
   if (message.type === "QB_DELETE_MODEL") {
     handleLocalTask(message, sender, "QB_OFFSCREEN_DELETE_MODEL")
       .then(sendResponse)
@@ -102,6 +143,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         });
       });
 
+    return true;
+  }
+
+  if (message.type === "QB_RELEASE_COMPUTE_RESOURCES") {
+    handleReleaseComputeResources()
+      .then(sendResponse)
+      .catch((error) => {
+        sendResponse({
+          ok: false,
+          error: error.message || "Could not release local compute resources."
+        });
+      });
     return true;
   }
 
@@ -155,6 +208,34 @@ async function handleReleaseResources() {
   } finally {
     await closeOffscreenDocument();
   }
+}
+
+async function handleReleaseComputeResources() {
+  if (processingRequestId) {
+    return { ok: false, busy: true };
+  }
+
+  if (
+    typeof chrome.offscreen?.hasDocument === "function" &&
+    !(await chrome.offscreen.hasDocument())
+  ) {
+    return { ok: true };
+  }
+
+  return chrome.runtime.sendMessage({
+    type: "QB_OFFSCREEN_RELEASE_COMPUTE"
+  });
+}
+
+async function handleGetLastScreenshot() {
+  const documentCreated = await ensureOffscreenDocument();
+  const response = await chrome.runtime.sendMessage({
+    type: "QB_OFFSCREEN_GET_LAST_SCREENSHOT"
+  });
+  if (documentCreated && !response?.ok) {
+    await closeOffscreenDocument();
+  }
+  return response;
 }
 
 async function handlePrepareModel(message, sender) {
@@ -244,7 +325,10 @@ async function handleCaptureProcessLocal(message, sender) {
       screenshotDataUrl,
       rect: message.rect,
       modelId: message.modelId,
-      ocrLanguage: message.ocrLanguage
+      ocrLanguage: message.ocrLanguage,
+      mode: message.mode,
+      subject: message.subject,
+      userSelectedAnswer: message.userSelectedAnswer
     });
 
     if (!response) {

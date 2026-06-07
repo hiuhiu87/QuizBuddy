@@ -1,0 +1,47 @@
+[
+  {
+    "id": "vi-general-001",
+    "language": "vi",
+    "subject": "general-knowledge",
+    "ocrText": "Thủ đô của Việt Nam là thành phố nào?",
+    "expectedAnswerText": "Hà Nội",
+    "expectedCoreConceptKeywords": ["thủ đô", "Việt Nam"],
+    "notes": "Direct-answer Vietnamese case."
+  },
+  {
+    "id": "en-math-001",
+    "language": "en",
+    "subject": "math",
+    "ocrText": "What is 12 × 4?\nA. 36\nB. 42\nC. 48\nD. 52",
+    "expectedAnswerText": "48",
+    "expectedCoreConceptKeywords": ["multiplication"],
+    "notes": "Labeled multiple-choice arithmetic."
+  },
+  {
+    "id": "en-grammar-001",
+    "language": "en",
+    "subject": "english",
+    "ocrText": "Choose the correct form: She ___ to school every day.\ngoes\ngo\ngoing",
+    "expectedAnswerText": "goes",
+    "expectedCoreConceptKeywords": ["present simple", "third person"],
+    "notes": "Unlabeled English choices."
+  },
+  {
+    "id": "de-grammar-001",
+    "language": "de",
+    "subject": "german",
+    "ocrText": "Ergänze: Ich helfe ___ Mann.\nA. der\nB. dem\nC. den",
+    "expectedAnswerText": "dem",
+    "expectedCoreConceptKeywords": ["Dativ"],
+    "notes": "German case recognition."
+  },
+  {
+    "id": "en-law-001",
+    "language": "en",
+    "subject": "law",
+    "ocrText": "Why can jurisdiction matter when answering a legal question?",
+    "expectedAnswerText": "Laws vary by jurisdiction",
+    "expectedCoreConceptKeywords": ["jurisdiction", "facts"],
+    "notes": "Checks uncertainty-oriented law guidance."
+  }
+]

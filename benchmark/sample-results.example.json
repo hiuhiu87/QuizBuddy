@@ -1,0 +1,10 @@
+[
+  {
+    "id": "vi-general-001",
+    "content": "{\"answerText\":\"Hà Nội\",\"answerLabel\":\"\",\"confidence\":\"high\",\"shortExplanation\":\"Hà Nội là thủ đô của Việt Nam.\",\"coreKnowledge\":\"Thủ đô và địa lý Việt Nam\",\"notes\":\"\",\"optionAnalysis\":[]}"
+  },
+  {
+    "id": "en-math-001",
+    "content": "{\"answerText\":\"48\",\"answerLabel\":\"C\",\"confidence\":\"high\",\"shortExplanation\":\"12 multiplied by 4 is 48.\",\"coreKnowledge\":\"Multiplication\",\"notes\":\"Check arithmetic.\",\"optionAnalysis\":[]}"
+  }
+]
