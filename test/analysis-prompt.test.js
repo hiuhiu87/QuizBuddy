@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildAnalysisPrompt } from "../lib/analysis-prompt.js";
+import {
+  buildAnalysisPrompt,
+  buildCompactRetryPrompt
+} from "../lib/analysis-prompt.js";
 
 test("analysis prompt requires independent solving and option comparison", () => {
   const prompt = buildAnalysisPrompt(
@@ -39,4 +42,62 @@ test("analysis prompt includes OCR quality context", () => {
     buildAnalysisPrompt("Corrected question", { userCorrected: true }),
     /reviewed or corrected/
   );
+});
+
+test("analysis prompt differs by mode", () => {
+  const quick = buildAnalysisPrompt("Question", { mode: "quick" });
+  const learning = buildAnalysisPrompt("Question", {
+    mode: "learning"
+  });
+
+  assert.match(quick, /Quick Answer mode/);
+  assert.match(quick, /empty optionAnalysis/);
+  assert.match(learning, /Learning Mode/);
+  assert.match(learning, /each visible option/);
+});
+
+test("analysis prompt applies subject guidance and law uncertainty", () => {
+  assert.match(
+    buildAnalysisPrompt("Question", { subject: "math" }),
+    /units, signs, formulas/
+  );
+  assert.match(
+    buildAnalysisPrompt("Question", { subject: "law" }),
+    /jurisdiction or facts are incomplete/
+  );
+  assert.match(
+    buildAnalysisPrompt("Question", { subject: "auto" }),
+    /general reasoning/
+  );
+});
+
+test("analysis prompt includes an optional user answer", () => {
+  assert.match(
+    buildAnalysisPrompt("Question", { userSelectedAnswer: "B" }),
+    /User answer to check:\n"B"/
+  );
+  assert.match(
+    buildAnalysisPrompt("Question"),
+    /User answer to check:\nNot provided/
+  );
+});
+
+test("compact retry prompt requests only essential valid JSON fields", () => {
+  const prompt = buildCompactRetryPrompt("Question\nA. One\nB. Two", {
+    subject: "general-knowledge"
+  });
+
+  assert.match(prompt, /one small valid JSON object/);
+  assert.match(prompt, /"answerText"/);
+  assert.doesNotMatch(prompt, /optionAnalysis/);
+  assert.doesNotMatch(prompt, /miniExample/);
+});
+
+test("analysis prompt explicitly requires Vietnamese for Vietnamese OCR", () => {
+  const prompt = buildAnalysisPrompt(
+    "Điều gì xảy ra khi tiến trình chuyển sang trạng thái chờ?"
+  );
+
+  assert.match(prompt, /OCR question is Vietnamese/);
+  assert.match(prompt, /natural Vietnamese/);
 });

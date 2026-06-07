@@ -11,6 +11,16 @@ test("content UI is isolated in a closed Shadow Root", async () => {
   assert.match(source, /element\.style\.setProperty\(property,\s*value,\s*"important"\)/);
 });
 
+test("content host exposes no public DOM id or named window flag", async () => {
+  const source = await readFile("content/content.js", "utf8");
+
+  assert.doesNotMatch(source, /host\.id\s*=/);
+  assert.doesNotMatch(source, /quizbuddy-ai-root/);
+  assert.doesNotMatch(source, /window\.__quizBuddyInjected/);
+  assert.match(source, /Symbol\.for\("qb\.content\.injected"\)/);
+  assert.match(source, /enumerable:\s*false/);
+});
+
 test("content CSS resets the shadow host", async () => {
   const css = await readFile("content/content.css", "utf8");
 
@@ -93,7 +103,39 @@ test("local inference uses accuracy-oriented decoding and context", async () => 
 
   assert.match(source, /role:\s*"system"/);
   assert.match(source, /temperature:\s*0/);
-  assert.match(source, /max_tokens:\s*700/);
+  assert.match(source, /max_tokens:\s*sourceQuality\.mode === "quick" \? 350 : 950/);
   assert.match(source, /context_window_size:\s*4096/);
   assert.match(source, /question-only direct-answer prompts/);
+});
+
+test("study notes and screenshots remain session-only", async () => {
+  const content = await readFile("content/content.js", "utf8");
+  const offscreen = await readFile("offscreen.js", "utf8");
+
+  assert.match(content, /let sessionStudyNotes = \[\]/);
+  assert.doesNotMatch(content, /qbSessionStudyNotes/);
+  assert.doesNotMatch(content, /qbLastScreenshot/);
+  assert.match(offscreen, /let lastScreenshotDataUrl = null/);
+  assert.match(offscreen, /lastScreenshotDataUrl = null;\n  await releaseComputeResources/);
+  assert.doesNotMatch(offscreen, /chrome\.storage/);
+});
+
+test("mode and subject preferences are stored without persisting study data", async () => {
+  const source = await readFile("content/content.js", "utf8");
+
+  assert.match(source, /const ANALYSIS_MODE_KEY = "qbAnalysisMode"/);
+  assert.match(source, /const SUBJECT_PRESET_KEY = "qbSubjectPreset"/);
+  assert.match(source, /\[ANALYSIS_MODE_KEY\]: selectedAnalysisMode/);
+  assert.match(source, /\[SUBJECT_PRESET_KEY\]: selectedSubject/);
+  assert.match(source, /if \(result\.miniExample\)/);
+});
+
+test("true re-crop uses the existing offscreen screenshot", async () => {
+  const background = await readFile("background.js", "utf8");
+  const offscreen = await readFile("offscreen.js", "utf8");
+
+  assert.match(background, /QB_RECROP_LAST_SCREENSHOT/);
+  assert.match(background, /QB_OFFSCREEN_RECROP_LAST_SCREENSHOT/);
+  assert.match(offscreen, /screenshotDataUrl: lastScreenshotDataUrl/);
+  assert.match(offscreen, /No screenshot is available/);
 });

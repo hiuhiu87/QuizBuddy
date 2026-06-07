@@ -15,7 +15,21 @@ import {
   normalizeOCRText,
   parseAIResult
 } from "./lib/processing-utils.js";
-import { buildAnalysisPrompt } from "./lib/analysis-prompt.js";
+import {
+  buildAnalysisPrompt,
+  buildCompactRetryPrompt
+} from "./lib/analysis-prompt.js";
+import { calculateOverallReliability } from "./lib/reliability.js";
+import {
+  buildPracticePrompt,
+  parsePracticeResult
+} from "./lib/practice-utils.js";
+import { buildDeviceDiagnostics } from "./lib/device-diagnostics.js";
+import {
+  detectQuestionLanguage,
+  getResponseLanguageInstruction,
+  resultMatchesQuestionLanguage
+} from "./lib/language-utils.js";
 
 const MIN_OCR_TEXT_LENGTH = 8;
 
@@ -24,6 +38,9 @@ let loadedModelId = null;
 let ocrWorkerPromise = null;
 let loadedOCRLanguages = null;
 let activeRequestId = null;
+let lastScreenshotDataUrl = null;
+let lastModelLoadStatus = "not-loaded";
+let lastModelError = "";
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "QB_OFFSCREEN_MODEL_STATUS") {
@@ -65,6 +82,29 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === "QB_OFFSCREEN_GET_LAST_SCREENSHOT") {
+    sendResponse({
+      ok: Boolean(lastScreenshotDataUrl),
+      screenshotDataUrl: lastScreenshotDataUrl,
+      error: lastScreenshotDataUrl
+        ? ""
+        : "No screenshot is available for re-cropping."
+    });
+    return false;
+  }
+
+  if (message.type === "QB_OFFSCREEN_RECROP_LAST_SCREENSHOT") {
+    processLastScreenshot(message)
+      .then(sendResponse)
+      .catch((error) => {
+        sendResponse({
+          ok: false,
+          error: error.message || "Could not re-crop the screenshot."
+        });
+      });
+    return true;
+  }
+
   if (message.type === "QB_OFFSCREEN_ANALYZE_TEXT") {
     analyzeEditedText(message)
       .then(sendResponse)
@@ -76,6 +116,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         });
       });
 
+    return true;
+  }
+
+  if (message.type === "QB_OFFSCREEN_GENERATE_PRACTICE") {
+    generatePracticeQuestion(message)
+      .then(sendResponse)
+      .catch((error) => {
+        sendResponse({
+          ok: false,
+          stage: "practice",
+          error: error.message || "Could not generate a practice question."
+        });
+      });
     return true;
   }
 
@@ -105,6 +158,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === "QB_OFFSCREEN_RELEASE_COMPUTE") {
+    releaseComputeResources()
+      .then(() => sendResponse({ ok: true }))
+      .catch((error) => {
+        sendResponse({
+          ok: false,
+          error: error.message || "Could not release local compute resources."
+        });
+      });
+    return true;
+  }
+
   return false;
 });
 
@@ -122,6 +187,7 @@ async function getModelStatus(modelId) {
   const selectedModel = models.find(
     (model) => model.id === selectedProfile.id
   );
+  const diagnostics = await getDeviceDiagnostics(selectedProfile);
 
   return {
     ok: true,
@@ -133,7 +199,8 @@ async function getModelStatus(modelId) {
     ),
     webgpuAvailable: Boolean(navigator.gpu),
     selectedModel,
-    models
+    models,
+    diagnostics
   };
 }
 
@@ -145,6 +212,8 @@ async function prepareModel(requestId, modelId) {
   }
 
   activeRequestId = requestId;
+  lastModelLoadStatus = "loading";
+  lastModelError = "";
   try {
     reportProgress(
       "model",
@@ -153,6 +222,7 @@ async function prepareModel(requestId, modelId) {
     );
     const profile = getModelProfile(modelId);
     await getWebLLMEngine(profile.id);
+    lastModelLoadStatus = "ready";
     reportProgress("model-ready", "Local AI model is ready.", 1);
     return {
       ok: true,
@@ -160,6 +230,10 @@ async function prepareModel(requestId, modelId) {
       ready: true,
       modelId: profile.id
     };
+  } catch (error) {
+    lastModelLoadStatus = "error";
+    lastModelError = error.message || "Unknown model load error";
+    throw error;
   } finally {
     activeRequestId = null;
   }
@@ -170,12 +244,51 @@ async function processImageLocally({
   screenshotDataUrl,
   rect,
   modelId,
-  ocrLanguage
+  ocrLanguage,
+  mode,
+  subject,
+  userSelectedAnswer
 }) {
   if (!screenshotDataUrl || !rect) {
     throw new Error("Screenshot data or crop coordinates are missing.");
   }
 
+  lastScreenshotDataUrl = screenshotDataUrl;
+  return processScreenshotLocally({
+    requestId,
+    screenshotDataUrl,
+    rect,
+    modelId,
+    ocrLanguage,
+    mode,
+    subject,
+    userSelectedAnswer
+  });
+}
+
+async function processLastScreenshot(message) {
+  if (!lastScreenshotDataUrl) {
+    throw new Error(
+      "No screenshot is available. Capture a question before using re-crop."
+    );
+  }
+
+  return processScreenshotLocally({
+    ...message,
+    screenshotDataUrl: lastScreenshotDataUrl
+  });
+}
+
+async function processScreenshotLocally({
+  requestId,
+  screenshotDataUrl,
+  rect,
+  modelId,
+  ocrLanguage,
+  mode,
+  subject,
+  userSelectedAnswer
+}) {
   activeRequestId = requestId;
 
   try {
@@ -218,7 +331,10 @@ async function processImageLocally({
     try {
       reportProgress("webllm", "Analyzing with local WebLLM...", 0.55);
       const aiResult = await runWebLLMAnalysis(ocrText, modelId, {
-        ocrConfidence
+        ocrConfidence,
+        mode,
+        subject,
+        userSelectedAnswer
       });
       reportProgress("done", "Done.", 1);
       return {
@@ -243,7 +359,14 @@ async function processImageLocally({
   }
 }
 
-async function analyzeEditedText({ requestId, ocrText, modelId }) {
+async function analyzeEditedText({
+  requestId,
+  ocrText,
+  modelId,
+  mode,
+  subject,
+  userSelectedAnswer
+}) {
   const normalizedText = normalizeOCRText(ocrText || "");
   if (normalizedText.length < MIN_OCR_TEXT_LENGTH) {
     throw new Error(
@@ -255,7 +378,10 @@ async function analyzeEditedText({ requestId, ocrText, modelId }) {
   try {
     reportProgress("webllm", "Analyzing edited text locally...", 0.1);
     const aiResult = await runWebLLMAnalysis(normalizedText, modelId, {
-      userCorrected: true
+      userCorrected: true,
+      mode,
+      subject,
+      userSelectedAnswer
     });
     reportProgress("done", "Done.", 1);
     return {
@@ -263,6 +389,63 @@ async function analyzeEditedText({ requestId, ocrText, modelId }) {
       ocrText: normalizedText,
       aiResult
     };
+  } finally {
+    activeRequestId = null;
+  }
+}
+
+async function generatePracticeQuestion({
+  requestId,
+  ocrText,
+  aiResult,
+  modelId,
+  subject
+}) {
+  activeRequestId = requestId;
+  try {
+    reportProgress(
+      "practice",
+      "Generating a similar practice question locally...",
+      0.1
+    );
+    const profile = getModelProfile(modelId);
+    const modelCached = await hasModelInCache(
+      profile.id,
+      getWebLLMAppConfig()
+    );
+    if (!modelCached) {
+      throw new Error("The selected local model is not available.");
+    }
+
+    const engine = await getWebLLMEngine(profile.id);
+    const response = await engine.chat.completions.create({
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are a local learning tutor. Create one original practice question and return valid JSON only."
+        },
+        {
+          role: "user",
+          content: buildPracticePrompt({
+            ocrText,
+            aiResult,
+            subject
+          })
+        }
+      ],
+      temperature: 0.35,
+      max_tokens: 500,
+      response_format: { type: "json_object" }
+    });
+    const result = parsePracticeResult(
+      response?.choices?.[0]?.message?.content || ""
+    );
+    if (!result.ok) {
+      throw new Error(result.error);
+    }
+    reportProgress("done", "Practice question ready.", 1);
+    return result;
   } finally {
     activeRequestId = null;
   }
@@ -511,12 +694,14 @@ async function runWebLLMAnalysis(ocrText, modelId, sourceQuality = {}) {
   }
 
   const engine = await getWebLLMEngine(profile.id);
+  const targetLanguage = detectQuestionLanguage(ocrText);
   const response = await engine.chat.completions.create({
     messages: [
       {
         role: "system",
-        content:
-          "You are QuizBuddy AI. Answer both multiple-choice questions and question-only direct-answer prompts. When choices exist, verify the selected option against the OCR text. When choices do not exist, answer directly without asking for them. Return valid JSON only."
+        content: `You are QuizBuddy AI, a private local learning tutor. Answer both multiple-choice questions and question-only direct-answer prompts. Verify visible choices, expose uncertainty, and return valid JSON only.
+
+${getResponseLanguageInstruction(targetLanguage)}`
       },
       {
         role: "user",
@@ -524,12 +709,68 @@ async function runWebLLMAnalysis(ocrText, modelId, sourceQuality = {}) {
       }
     ],
     temperature: 0,
-    max_tokens: 700,
+    max_tokens: sourceQuality.mode === "quick" ? 350 : 950,
     response_format: { type: "json_object" }
   });
 
   const content = response?.choices?.[0]?.message?.content || "";
-  return parseAIResult(content, ocrText);
+  let result = parseAIResult(content, ocrText, {
+    requestedMode: sourceQuality.mode,
+    userSelectedAnswer: sourceQuality.userSelectedAnswer
+  });
+  const languageMismatch = !resultMatchesQuestionLanguage(
+    result,
+    targetLanguage
+  );
+  if (result.parseStatus === "fallback" || languageMismatch) {
+    reportProgress(
+      "webllm",
+      languageMismatch
+        ? "The local model used the wrong language. Retrying in the question language..."
+        : "The local model returned malformed JSON. Retrying with a compact response...",
+      0.82
+    );
+    const retryResponse = await engine.chat.completions.create({
+      messages: [
+        {
+          role: "system",
+          content: `Return one small valid JSON object only. Do not use markdown.
+
+${getResponseLanguageInstruction(targetLanguage)}`
+        },
+        {
+          role: "user",
+          content: buildCompactRetryPrompt(ocrText, {
+            subject: sourceQuality.subject,
+            forceLanguage: targetLanguage
+          })
+        }
+      ],
+      temperature: 0,
+      max_tokens: 320,
+      response_format: { type: "json_object" }
+    });
+    result = parseAIResult(
+      retryResponse?.choices?.[0]?.message?.content || "",
+      ocrText,
+      {
+        requestedMode: sourceQuality.mode,
+        userSelectedAnswer: sourceQuality.userSelectedAnswer
+      }
+    );
+  }
+  const overallReliability = calculateOverallReliability({
+    ocrConfidence: sourceQuality.ocrConfidence,
+    aiConfidence: result.confidence,
+    parseStatus: result.parseStatus,
+    answerWasExpandedFromOption: result.answerWasExpandedFromOption,
+    wasOcrEdited: sourceQuality.userCorrected === true
+  });
+
+  return {
+    ...result,
+    overallReliability
+  };
 }
 
 async function getWebLLMEngine(modelId) {
@@ -551,6 +792,11 @@ async function getWebLLMEngine(modelId) {
 }
 
 async function releaseLocalResources() {
+  lastScreenshotDataUrl = null;
+  await releaseComputeResources();
+}
+
+async function releaseComputeResources() {
   await Promise.allSettled([
     releaseWebLLMEngine(),
     releaseOCRWorker()
@@ -612,8 +858,39 @@ async function createWebLLMEngine(profile) {
       }
     );
   } catch (error) {
+    lastModelLoadStatus = "error";
+    lastModelError = error.message || "Unknown WebLLM initialization error";
     throw new Error(`WebLLM initialization failed: ${error.message}`);
   }
+}
+
+async function getDeviceDiagnostics(selectedModelProfile) {
+  const webgpuAvailable = Boolean(navigator.gpu);
+  let adapterInfo = "";
+
+  if (webgpuAvailable) {
+    try {
+      const adapter = await navigator.gpu.requestAdapter();
+      const info = adapter?.info;
+      adapterInfo = [
+        info?.vendor,
+        info?.architecture,
+        info?.description
+      ]
+        .filter(Boolean)
+        .join(" · ");
+    } catch {
+      adapterInfo = "";
+    }
+  }
+
+  return buildDeviceDiagnostics({
+    webgpuAvailable,
+    adapterInfo,
+    selectedModelProfile,
+    lastModelStatus: lastModelLoadStatus,
+    lastModelError
+  });
 }
 
 function getWebLLMAppConfig() {
