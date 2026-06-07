@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
   "name": "QuizBuddy AI",
-  "version": "0.8.1",
+  "version": "0.9.4",
   "minimum_chrome_version": "116",
-  "description": "Crop multiple-choice questions and analyze them locally with OCR and WebLLM.",
+  "description": "Crop questions and answer them locally with OCR and WebLLM.",
   "permissions": [
     "activeTab",
     "tabs",

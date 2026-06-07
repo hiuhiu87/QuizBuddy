@@ -33,7 +33,14 @@
   justify-content: center;
   position: fixed;
   right: 24px;
-  transition: background 0.2s ease, transform 0.2s ease;
+  touch-action: none;
+  transition:
+    border-radius 0.22s ease,
+    box-shadow 0.22s ease,
+    height 0.22s ease,
+    right 0.22s ease,
+    transform 0.22s ease,
+    width 0.22s ease;
   width: 36px;
   z-index: 2147483645;
   pointer-events: auto;
@@ -45,12 +52,67 @@
   transform: translateY(-2px);
 }
 
+.qb-floating-button.qb-floating-dragging {
+  cursor: grabbing;
+  transform:
+    translate(
+      var(--qb-drag-x, 0),
+      var(--qb-drag-y, 0)
+    );
+  transition: none;
+}
+
+.qb-floating-button.qb-floating-docked {
+  border-radius: 12px 0 0 12px;
+  box-shadow: -4px 4px 16px rgba(15, 23, 42, 0.24);
+  height: 48px;
+  right: -29px;
+  width: 42px;
+}
+
+.qb-floating-button.qb-floating-docked:hover {
+  right: -24px;
+  transform: none;
+}
+
 .qb-floating-icon {
   display: block;
   height: 52px;
   object-fit: contain;
   pointer-events: none;
   width: 52px;
+}
+
+.qb-floating-button.qb-floating-docked .qb-floating-icon {
+  opacity: 0;
+  transform: scale(0.7);
+}
+
+.qb-floating-dock-handle {
+  align-items: center;
+  background: #4f46e5;
+  border-radius: 10px 0 0 10px;
+  color: #ffffff;
+  display: flex;
+  font-family: Arial, sans-serif;
+  font-size: 22px;
+  font-weight: 700;
+  height: 42px;
+  justify-content: center;
+  left: 0;
+  line-height: 1;
+  opacity: 0;
+  pointer-events: none;
+  position: absolute;
+  top: 3px;
+  transform: translateX(8px);
+  transition: opacity 0.18s ease, transform 0.22s ease;
+  width: 15px;
+}
+
+.qb-floating-button.qb-floating-docked .qb-floating-dock-handle {
+  opacity: 1;
+  transform: translateX(0);
 }
 
 .qb-sidebar {
@@ -394,6 +456,19 @@
   resize: vertical;
   white-space: pre-wrap;
   width: 100%;
+}
+
+.qb-ocr-confidence {
+  color: #64748b;
+  font-family: Arial, sans-serif;
+  font-size: 11px;
+  line-height: 1.45;
+  margin-bottom: 6px;
+}
+
+.qb-ocr-confidence.qb-ocr-confidence-low {
+  color: #b45309;
+  font-weight: 700;
 }
 
 .qb-analyze-button {
