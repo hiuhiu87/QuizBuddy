@@ -63,6 +63,16 @@ Fix floating icon asset path
 Guard option labels against OCR text
 ```
 
+## Release process
+
+Do not create routine release tags manually. Merging into `main` triggers the
+release workflow, which increments the patch version, builds the extension,
+creates the `vX.Y.Z` tag, and publishes the ZIP and checksum.
+
+Keep `package.json` and `manifest.json` versions aligned. Run
+`npm run version:sync` after changing the package version manually for an
+exceptional major or minor release.
+
 ## Licensing
 
 By contributing, you agree that your contributions will be licensed under the

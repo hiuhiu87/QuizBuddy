@@ -1,0 +1,113 @@
+name: Release Extension
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build, tag, and release
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run checks
+        run: npm run check
+
+      - name: Bump patch version
+        id: version
+        shell: bash
+        run: |
+          npm version patch --no-git-tag-version
+          npm run version:sync
+          version="$(node -p "require('./package.json').version")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+      - name: Check release tag
+        id: tag
+        shell: bash
+        run: |
+          if git rev-parse "${{ steps.version.outputs.tag }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build extension
+        run: npm run build
+
+      - name: Package extension
+        shell: bash
+        run: |
+          mkdir -p release
+          (
+            cd dist
+            zip -r "../release/quizbuddy-ai-${{ steps.version.outputs.version }}.zip" .
+          )
+          sha256sum \
+            "release/quizbuddy-ai-${{ steps.version.outputs.version }}.zip" \
+            > "release/quizbuddy-ai-${{ steps.version.outputs.version }}.zip.sha256"
+
+      - name: Commit release version and create tag
+        if: steps.tag.outputs.exists != 'true'
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json manifest.json
+          git commit -m "chore(release): ${{ steps.version.outputs.tag }} [skip ci]"
+          git tag -a "${{ steps.version.outputs.tag }}" \
+            -m "QuizBuddy AI ${{ steps.version.outputs.tag }}"
+          git push origin HEAD:main
+          git push origin "${{ steps.version.outputs.tag }}"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          if gh release view "${{ steps.version.outputs.tag }}" >/dev/null 2>&1; then
+            gh release upload "${{ steps.version.outputs.tag }}" \
+              "release/quizbuddy-ai-${{ steps.version.outputs.version }}.zip" \
+              "release/quizbuddy-ai-${{ steps.version.outputs.version }}.zip.sha256" \
+              --clobber
+          else
+            gh release create "${{ steps.version.outputs.tag }}" \
+              "release/quizbuddy-ai-${{ steps.version.outputs.version }}.zip" \
+              "release/quizbuddy-ai-${{ steps.version.outputs.version }}.zip.sha256" \
+              --title "QuizBuddy AI ${{ steps.version.outputs.tag }}" \
+              --generate-notes \
+              --verify-tag
+          fi
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: quizbuddy-ai-${{ steps.version.outputs.version }}
+          path: release/
+          if-no-files-found: error
+          retention-days: 30

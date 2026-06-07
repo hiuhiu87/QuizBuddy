@@ -14,6 +14,9 @@ import { MODEL_PROFILES } from "../lib/app-config.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dist = path.join(root, "dist");
+const packageJson = JSON.parse(
+  await readFile(path.join(root, "package.json"), "utf8")
+);
 const webllmRuntimeBaseUrl =
   "https://raw.githubusercontent.com/mlc-ai/binary-mlc-llm-libs/main/web-llm-models/v0_2_48/";
 
@@ -123,7 +126,7 @@ await build({
 
 const manifestPath = path.join(dist, "manifest.json");
 const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
-manifest.version = "0.9.4";
+manifest.version = packageJson.version;
 await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 
 console.log(`Built QuizBuddy AI extension at ${dist}`);
