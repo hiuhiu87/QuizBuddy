@@ -26,10 +26,16 @@ import {
   let selectedModelCached = false;
   let selectedModelId = DEFAULT_MODEL_ID;
   let selectedOcrLanguage = DEFAULT_OCR_LANGUAGE;
+  let floatingButtonDocked = false;
+  let floatingPointerStart = null;
+  let floatingButtonDragged = false;
+  let suppressFloatingClick = false;
   let preferencesLoadedPromise = null;
+  let resourceReleaseTimer = null;
 
   const MODEL_SELECTION_KEY = "qbSelectedModelId";
   const OCR_LANGUAGE_KEY = "qbOcrLanguage";
+  const FLOATING_BUTTON_DOCKED_KEY = "qbFloatingButtonDocked";
   const host = document.createElement("div");
   host.id = "quizbuddy-ai-root";
   setProtectedHostStyles(host);
@@ -48,7 +54,9 @@ import {
   icon.alt = "";
   icon.className = "qb-floating-icon";
   icon.setAttribute("aria-hidden", "true");
-  floatingButton.append(icon);
+  const dockHandle = createElement("span", "qb-floating-dock-handle", "‹");
+  dockHandle.setAttribute("aria-hidden", "true");
+  floatingButton.append(icon, dockHandle);
 
   const sidebar = createElement("aside", "qb-sidebar");
   sidebar.setAttribute("aria-label", "QuizBuddy AI");
@@ -67,7 +75,7 @@ import {
         <select id="qb-model-select" class="qb-select qb-model-select">
           ${MODEL_PROFILES.map(
             (profile) =>
-              `<option value="${profile.id}">${profile.label} - Qwen2.5 ${profile.id.includes("0.5B") ? "0.5B" : "1.5B"}</option>`
+              `<option value="${profile.id}">${profile.label} - Qwen2.5 ${profile.parameterLabel}</option>`
           ).join("")}
         </select>
         <div class="qb-model-card-text">
@@ -108,6 +116,7 @@ import {
       </section>
       <section class="qb-section qb-ocr-section qb-hidden">
         <h2 class="qb-section-title">OCR Text</h2>
+        <div class="qb-ocr-confidence"></div>
         <textarea class="qb-ocr-textarea" rows="8" spellcheck="true"></textarea>
         <button class="qb-analyze-button" type="button">Analyze Again</button>
       </section>
@@ -145,6 +154,7 @@ import {
   const previewSection = sidebar.querySelector(".qb-preview-section");
   const previewImage = sidebar.querySelector(".qb-preview-image");
   const ocrSection = sidebar.querySelector(".qb-ocr-section");
+  const ocrConfidence = sidebar.querySelector(".qb-ocr-confidence");
   const ocrTextarea = sidebar.querySelector(".qb-ocr-textarea");
   const analyzeButton = sidebar.querySelector(".qb-analyze-button");
   const resultSection = sidebar.querySelector(".qb-result-section");
@@ -156,15 +166,28 @@ import {
   modelStorageOrigin.textContent = `chrome-extension://${chrome.runtime.id}`;
 
   floatingButton.addEventListener("click", async () => {
+    if (suppressFloatingClick) {
+      suppressFloatingClick = false;
+      return;
+    }
+
+    if (floatingButtonDocked) {
+      await setFloatingButtonDocked(false);
+      return;
+    }
+
     const willOpen = !sidebar.classList.contains("qb-sidebar-open");
     sidebar.classList.toggle("qb-sidebar-open");
     if (willOpen) {
       await ensureModelOnboarding();
+    } else {
+      releaseLocalResources();
     }
   });
 
   closeButton.addEventListener("click", () => {
     sidebar.classList.remove("qb-sidebar-open");
+    releaseLocalResources();
   });
 
   cropButton.addEventListener("click", startCropMode);
@@ -176,6 +199,12 @@ import {
   modelDeleteButton.addEventListener("click", deleteSelectedModel);
   modelSelect.addEventListener("change", onModelSelectionChange);
   ocrLanguageSelect.addEventListener("change", onOCRLanguageChange);
+  floatingButton.addEventListener("pointerdown", onFloatingPointerDown);
+  floatingButton.addEventListener("pointermove", onFloatingPointerMove);
+  floatingButton.addEventListener("pointerup", onFloatingPointerUp);
+  floatingButton.addEventListener("pointercancel", resetFloatingPointer);
+  window.addEventListener("pagehide", releaseLocalResources);
+  loadPreferences().catch(() => {});
 
   chrome.runtime.onMessage.addListener(message => {
     if (message.type === "QB_OPEN_SIDEBAR") {
@@ -239,6 +268,7 @@ import {
       return;
     }
 
+    cancelScheduledResourceRelease();
     sidebar.classList.remove("qb-sidebar-open");
     clearError();
     setStatus("Drag to select the question area.");
@@ -336,6 +366,7 @@ import {
     } finally {
       activeRequestId = null;
       setProcessingState(false);
+      scheduleResourceRelease();
     }
   }
 
@@ -394,6 +425,14 @@ import {
       ocrTextarea.value = result.ocrText;
       ocrSection.classList.remove("qb-hidden");
     }
+
+    if (Number.isFinite(result.ocrConfidence)) {
+      const confidence = Math.round(result.ocrConfidence);
+      ocrConfidence.textContent = `OCR confidence: ${confidence}%${
+        confidence < 80 ? " - review the text before trusting the answer." : ""
+      }`;
+      ocrConfidence.classList.toggle("qb-ocr-confidence-low", confidence < 80);
+    }
   }
 
   function renderAIResult(result) {
@@ -402,8 +441,12 @@ import {
       : result.answerText;
 
     resultCard.replaceChildren(
-      createResultItem("Suggested Answer", suggestedAnswer, "qb-answer"),
+      createResultItem("Answer", suggestedAnswer, "qb-answer"),
       createResultItem("Confidence", result.confidence),
+      createResultItem(
+        "Local Model",
+        getModelProfile(selectedModelId).label
+      ),
       createResultItem("Explanation", result.shortExplanation),
       createResultItem("Core Knowledge", result.coreKnowledge),
       createResultItem("Study Note", result.notes)
@@ -427,6 +470,8 @@ import {
     clearError();
     previewImage.removeAttribute("src");
     ocrTextarea.value = "";
+    ocrConfidence.textContent = "";
+    ocrConfidence.classList.remove("qb-ocr-confidence-low");
     resultCard.replaceChildren();
     previewSection.classList.add("qb-hidden");
     ocrSection.classList.add("qb-hidden");
@@ -510,6 +555,7 @@ import {
   }
 
   async function prepareLocalModel() {
+    cancelScheduledResourceRelease();
     clearError();
     modelRequestId = crypto.randomUUID();
     setModelCardState("downloading");
@@ -534,6 +580,7 @@ import {
     } finally {
       modelRequestId = null;
       setProcessingState(false);
+      scheduleResourceRelease(30000);
     }
   }
 
@@ -608,7 +655,7 @@ import {
       const profile = getModelProfile(selectedModelId);
       modelCardTitle.textContent = `${profile.label} Model Is Cached`;
       modelCardText.textContent =
-        "The model is already stored by Chrome. Click below to load it into WebGPU for this session.";
+        `${profile.description} The model is already stored by Chrome. Click below to load it into WebGPU for this session.`;
       modelDownloadButton.textContent = "Use Cached Model";
       modelLaterButton.classList.add("qb-hidden");
       modelDeleteButton.classList.remove("qb-hidden");
@@ -646,7 +693,11 @@ import {
   async function loadPreferences() {
     if (!preferencesLoadedPromise) {
       preferencesLoadedPromise = chrome.storage.local
-        .get([MODEL_SELECTION_KEY, OCR_LANGUAGE_KEY])
+        .get([
+          MODEL_SELECTION_KEY,
+          OCR_LANGUAGE_KEY,
+          FLOATING_BUTTON_DOCKED_KEY
+        ])
         .then((storage) => {
           selectedModelId = getModelProfile(
             storage[MODEL_SELECTION_KEY]
@@ -654,8 +705,11 @@ import {
           selectedOcrLanguage = normalizeOCRLanguage(
             storage[OCR_LANGUAGE_KEY]
           );
+          floatingButtonDocked =
+            storage[FLOATING_BUTTON_DOCKED_KEY] === true;
           modelSelect.value = selectedModelId;
           ocrLanguageSelect.value = selectedOcrLanguage;
+          applyFloatingButtonDockState();
         });
     }
 
@@ -680,6 +734,93 @@ import {
     await chrome.storage.local.set({
       [OCR_LANGUAGE_KEY]: selectedOcrLanguage
     });
+  }
+
+  async function setFloatingButtonDocked(docked) {
+    floatingButtonDocked = Boolean(docked);
+    applyFloatingButtonDockState();
+    await chrome.storage.local.set({
+      [FLOATING_BUTTON_DOCKED_KEY]: floatingButtonDocked
+    });
+  }
+
+  function applyFloatingButtonDockState() {
+    floatingButton.classList.toggle("qb-floating-docked", floatingButtonDocked);
+    floatingButton.title = floatingButtonDocked
+      ? "Expand QuizBuddy AI button"
+      : "Open QuizBuddy AI";
+    floatingButton.setAttribute(
+      "aria-label",
+      floatingButtonDocked
+        ? "Expand QuizBuddy AI button"
+        : "Open QuizBuddy AI"
+    );
+  }
+
+  function onFloatingPointerDown(event) {
+    if (event.button !== 0 || floatingButtonDocked) {
+      return;
+    }
+
+    floatingPointerStart = {
+      pointerId: event.pointerId,
+      x: event.clientX,
+      y: event.clientY
+    };
+    floatingButtonDragged = false;
+    floatingButton.setPointerCapture(event.pointerId);
+    floatingButton.classList.add("qb-floating-dragging");
+  }
+
+  function onFloatingPointerMove(event) {
+    if (floatingPointerStart?.pointerId !== event.pointerId) {
+      return;
+    }
+
+    const deltaX = Math.max(0, event.clientX - floatingPointerStart.x);
+    const deltaY = event.clientY - floatingPointerStart.y;
+    if (deltaX > 4 || Math.abs(deltaY) > 4) {
+      floatingButtonDragged = true;
+    }
+
+    floatingButton.style.setProperty(
+      "--qb-drag-x",
+      `${Math.min(deltaX, 52)}px`
+    );
+    floatingButton.style.setProperty(
+      "--qb-drag-y",
+      `${Math.max(-80, Math.min(80, deltaY))}px`
+    );
+  }
+
+  async function onFloatingPointerUp(event) {
+    if (floatingPointerStart?.pointerId !== event.pointerId) {
+      return;
+    }
+
+    const deltaX = event.clientX - floatingPointerStart.x;
+    const nearRightEdge = window.innerWidth - event.clientX <= 32;
+    const shouldDock = floatingButtonDragged && (deltaX >= 24 || nearRightEdge);
+    suppressFloatingClick = floatingButtonDragged;
+    resetFloatingPointer(event);
+
+    if (shouldDock) {
+      await setFloatingButtonDocked(true);
+    }
+  }
+
+  function resetFloatingPointer(event) {
+    if (
+      event?.pointerId !== undefined &&
+      floatingButton.hasPointerCapture(event.pointerId)
+    ) {
+      floatingButton.releasePointerCapture(event.pointerId);
+    }
+    floatingPointerStart = null;
+    floatingButtonDragged = false;
+    floatingButton.classList.remove("qb-floating-dragging");
+    floatingButton.style.removeProperty("--qb-drag-x");
+    floatingButton.style.removeProperty("--qb-drag-y");
   }
 
   async function deleteSelectedModel() {
@@ -737,6 +878,7 @@ import {
     }
 
     activeRequestId = crypto.randomUUID();
+    cancelScheduledResourceRelease();
     clearError();
     resultSection.classList.add("qb-hidden");
     resultCard.replaceChildren();
@@ -757,6 +899,7 @@ import {
     } finally {
       activeRequestId = null;
       setProcessingState(false);
+      scheduleResourceRelease();
     }
   }
 
@@ -791,6 +934,28 @@ import {
     return memoryMB >= 1024
       ? `${(memoryMB / 1024).toFixed(2)} GB`
       : `${Math.round(memoryMB)} MB`;
+  }
+
+  function scheduleResourceRelease(delay = 5000) {
+    cancelScheduledResourceRelease();
+    resourceReleaseTimer = window.setTimeout(() => {
+      resourceReleaseTimer = null;
+      releaseLocalResources();
+    }, delay);
+  }
+
+  function cancelScheduledResourceRelease() {
+    if (resourceReleaseTimer !== null) {
+      window.clearTimeout(resourceReleaseTimer);
+      resourceReleaseTimer = null;
+    }
+  }
+
+  function releaseLocalResources() {
+    cancelScheduledResourceRelease();
+    chrome.runtime
+      .sendMessage({ type: "QB_RELEASE_RESOURCES" })
+      .catch(() => {});
   }
 
   function waitForBrowserPaint() {

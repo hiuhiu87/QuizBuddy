@@ -94,6 +94,16 @@ test("parseAIResult preserves a full unlabeled answer", () => {
   assert.equal(result.answerLabel, "");
 });
 
+test("parseAIResult preserves a direct answer without choices", () => {
+  const result = parseAIResult(
+    '{"answerText":"Hà Nội","answerLabel":"","confidence":"high","shortExplanation":"Hà Nội là thủ đô của Việt Nam.","coreKnowledge":"Địa lý Việt Nam","notes":""}',
+    "Thủ đô của Việt Nam là thành phố nào?"
+  );
+
+  assert.equal(result.answerText, "Hà Nội");
+  assert.equal(result.answerLabel, "");
+});
+
 test("parseAIResult expands a label-only answer using OCR choice text", () => {
   const result = parseAIResult(
     '{"answerText":"B","answerLabel":"B","confidence":"high","shortExplanation":"","coreKnowledge":"","notes":""}',

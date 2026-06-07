@@ -123,7 +123,7 @@ await build({
 
 const manifestPath = path.join(dist, "manifest.json");
 const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
-manifest.version = "0.8.1";
+manifest.version = "0.9.4";
 await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 
 console.log(`Built QuizBuddy AI extension at ${dist}`);

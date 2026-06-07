@@ -15,12 +15,14 @@ import {
   normalizeOCRText,
   parseAIResult
 } from "./lib/processing-utils.js";
+import { buildAnalysisPrompt } from "./lib/analysis-prompt.js";
 
 const MIN_OCR_TEXT_LENGTH = 8;
 
 let webllmEnginePromise = null;
 let loadedModelId = null;
-const ocrWorkerPromises = new Map();
+let ocrWorkerPromise = null;
+let loadedOCRLanguages = null;
 let activeRequestId = null;
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -84,6 +86,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({
           ok: false,
           error: error.message || "Could not delete the local model."
+        });
+      });
+
+    return true;
+  }
+
+  if (message.type === "QB_OFFSCREEN_RELEASE_RESOURCES") {
+    releaseLocalResources()
+      .then(() => sendResponse({ ok: true }))
+      .catch((error) => {
+        sendResponse({
+          ok: false,
+          error: error.message || "Could not release local AI resources."
         });
       });
 
@@ -169,12 +184,16 @@ async function processImageLocally({
     reportPartial({ croppedImageDataUrl });
 
     let ocrText;
+    let ocrConfidence;
     try {
       reportProgress("ocr", "Running OCR locally...", 0.12);
-      ocrText = normalizeOCRText(
-        await runLocalOCR(croppedImageDataUrl, ocrLanguage)
+      const ocrResult = await runLocalOCR(
+        croppedImageDataUrl,
+        ocrLanguage
       );
-      reportPartial({ ocrText });
+      ocrText = normalizeOCRText(ocrResult.text);
+      ocrConfidence = ocrResult.confidence;
+      reportPartial({ ocrText, ocrConfidence });
     } catch (error) {
       return {
         ok: false,
@@ -191,18 +210,22 @@ async function processImageLocally({
         error:
           "OCR could not detect enough text. Try cropping the complete question more clearly.",
         croppedImageDataUrl,
-        ocrText
+        ocrText,
+        ocrConfidence
       };
     }
 
     try {
       reportProgress("webllm", "Analyzing with local WebLLM...", 0.55);
-      const aiResult = await runWebLLMAnalysis(ocrText, modelId);
+      const aiResult = await runWebLLMAnalysis(ocrText, modelId, {
+        ocrConfidence
+      });
       reportProgress("done", "Done.", 1);
       return {
         ok: true,
         croppedImageDataUrl,
         ocrText,
+        ocrConfidence,
         aiResult
       };
     } catch (error) {
@@ -211,7 +234,8 @@ async function processImageLocally({
         stage: "webllm",
         error: error.message,
         croppedImageDataUrl,
-        ocrText
+        ocrText,
+        ocrConfidence
       };
     }
   } finally {
@@ -230,7 +254,9 @@ async function analyzeEditedText({ requestId, ocrText, modelId }) {
   activeRequestId = requestId;
   try {
     reportProgress("webllm", "Analyzing edited text locally...", 0.1);
-    const aiResult = await runWebLLMAnalysis(normalizedText, modelId);
+    const aiResult = await runWebLLMAnalysis(normalizedText, modelId, {
+      userCorrected: true
+    });
     reportProgress("done", "Done.", 1);
     return {
       ok: true,
@@ -310,7 +336,7 @@ async function runLocalOCR(croppedImageDataUrl, language) {
   const primaryResult = await worker.recognize(grayscaleImage);
 
   if (isOCRResultReliable(primaryResult)) {
-    return primaryResult?.data?.text || "";
+    return toOCRResult(primaryResult);
   }
 
   reportProgress(
@@ -324,22 +350,37 @@ async function runLocalOCR(croppedImageDataUrl, language) {
     scoreOCRResult(retryResult) > scoreOCRResult(primaryResult)
       ? retryResult
       : primaryResult;
-  return bestResult?.data?.text || "";
+  return toOCRResult(bestResult);
+}
+
+function toOCRResult(result) {
+  return {
+    text: result?.data?.text || "",
+    confidence: Math.max(
+      0,
+      Math.min(100, Number(result?.data?.confidence) || 0)
+    )
+  };
 }
 
 async function getOCRWorker(language) {
   const normalizedLanguage = normalizeOCRLanguage(language);
   const tesseractLanguages = getTesseractLanguages(normalizedLanguage);
 
-  if (!ocrWorkerPromises.has(tesseractLanguages)) {
-    const workerPromise = createOCRWorker(tesseractLanguages).catch((error) => {
-      ocrWorkerPromises.delete(tesseractLanguages);
-      throw error;
-    });
-    ocrWorkerPromises.set(tesseractLanguages, workerPromise);
+  if (ocrWorkerPromise && loadedOCRLanguages !== tesseractLanguages) {
+    await releaseOCRWorker();
   }
 
-  return ocrWorkerPromises.get(tesseractLanguages);
+  if (!ocrWorkerPromise) {
+    loadedOCRLanguages = tesseractLanguages;
+    ocrWorkerPromise = createOCRWorker(tesseractLanguages).catch((error) => {
+      ocrWorkerPromise = null;
+      loadedOCRLanguages = null;
+      throw error;
+    });
+  }
+
+  return ocrWorkerPromise;
 }
 
 async function createOCRWorker(tesseractLanguages) {
@@ -451,7 +492,7 @@ function scoreOCRResult(result) {
   return confidence + Math.min(20, meaningfulCharacters / 5) + vietnameseMarks;
 }
 
-async function runWebLLMAnalysis(ocrText, modelId) {
+async function runWebLLMAnalysis(ocrText, modelId, sourceQuality = {}) {
   if (!navigator.gpu) {
     throw new Error(
       "WebGPU is not available in this browser. Use a supported Chrome/Edge version and enable hardware acceleration."
@@ -473,12 +514,17 @@ async function runWebLLMAnalysis(ocrText, modelId) {
   const response = await engine.chat.completions.create({
     messages: [
       {
+        role: "system",
+        content:
+          "You are QuizBuddy AI. Answer both multiple-choice questions and question-only direct-answer prompts. When choices exist, verify the selected option against the OCR text. When choices do not exist, answer directly without asking for them. Return valid JSON only."
+      },
+      {
         role: "user",
-        content: buildAnalysisPrompt(ocrText)
+        content: buildAnalysisPrompt(ocrText, sourceQuality)
       }
     ],
-    temperature: 0.1,
-    max_tokens: 500,
+    temperature: 0,
+    max_tokens: 700,
     response_format: { type: "json_object" }
   });
 
@@ -489,10 +535,7 @@ async function runWebLLMAnalysis(ocrText, modelId) {
 async function getWebLLMEngine(modelId) {
   const profile = getModelProfile(modelId);
   if (webllmEnginePromise && loadedModelId !== profile.id) {
-    const previousEngine = await webllmEnginePromise;
-    await previousEngine.unload();
-    webllmEnginePromise = null;
-    loadedModelId = null;
+    await releaseWebLLMEngine();
   }
 
   if (!webllmEnginePromise) {
@@ -505,6 +548,47 @@ async function getWebLLMEngine(modelId) {
   }
 
   return webllmEnginePromise;
+}
+
+async function releaseLocalResources() {
+  await Promise.allSettled([
+    releaseWebLLMEngine(),
+    releaseOCRWorker()
+  ]);
+}
+
+async function releaseWebLLMEngine() {
+  const enginePromise = webllmEnginePromise;
+  webllmEnginePromise = null;
+  loadedModelId = null;
+
+  if (!enginePromise) {
+    return;
+  }
+
+  try {
+    const engine = await enginePromise;
+    await engine.unload();
+  } catch {
+    // Failed initialization has already cleared its own state.
+  }
+}
+
+async function releaseOCRWorker() {
+  const workerPromise = ocrWorkerPromise;
+  ocrWorkerPromise = null;
+  loadedOCRLanguages = null;
+
+  if (!workerPromise) {
+    return;
+  }
+
+  try {
+    const worker = await workerPromise;
+    await worker.terminate();
+  } catch {
+    // Failed initialization has already cleared its own state.
+  }
 }
 
 async function createWebLLMEngine(profile) {
@@ -524,7 +608,7 @@ async function createWebLLMEngine(profile) {
         logLevel: "WARN"
       },
       {
-        context_window_size: 2048
+        context_window_size: 4096
       }
     );
   } catch (error) {
@@ -544,45 +628,10 @@ function getWebLLMAppConfig() {
         low_resource_required: true,
         vram_required_MB: profile.vramRequiredMB,
         overrides: {
-          context_window_size: 2048
+          context_window_size: 4096
         }
       }))
   };
-}
-
-function buildAnalysisPrompt(ocrText) {
-  return `You are QuizBuddy AI, a learning assistant.
-
-The user has extracted the following OCR text from an image of a multiple-choice question.
-
-Your task is to analyze the question and help the user learn.
-
-OCR text:
-"""
-${ocrText}
-"""
-
-Return valid JSON only with this structure:
-{
-  "answerText": "The complete text or value of the best answer, or Unknown",
-  "answerLabel": "The exact option label shown in OCR such as A, B, 1, or empty string",
-  "confidence": "low/medium/high",
-  "shortExplanation": "Briefly explain why the answer is correct.",
-  "coreKnowledge": "The key concept, formula, grammar rule, or theory needed to solve the question.",
-  "notes": "A short learning note to help the user avoid common mistakes."
-}
-
-Rules:
-- Do not include markdown.
-- Do not include extra text outside JSON.
-- Always put the actual answer content in "answerText", not only a letter.
-- Only set "answerLabel" when that exact label is visibly present before an option in the OCR text.
-- Never invent A/B/C/D labels when the choices are unlabeled.
-- If choices are unlabeled, return the full selected choice text and use an empty "answerLabel".
-- For a calculated or open response, return the actual value or statement in "answerText".
-- If the OCR text is unclear or incomplete, use "Unknown" and an empty "answerLabel".
-- Write the answer and learning explanation in the same language as the question.
-- Focus on learning explanation, not just the final answer.`;
 }
 
 function reportProgress(stage, text, progress) {

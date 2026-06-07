@@ -92,6 +92,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === "QB_RELEASE_RESOURCES") {
+    handleReleaseResources()
+      .then(sendResponse)
+      .catch((error) => {
+        sendResponse({
+          ok: false,
+          error: error.message || "Could not release local AI resources."
+        });
+      });
+
+    return true;
+  }
+
   if (
     message.type === "QB_PROCESS_PROGRESS" ||
     message.type === "QB_PROCESS_PARTIAL"
@@ -106,11 +119,42 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 async function handleGetModelStatus(message) {
-  await ensureOffscreenDocument();
-  return chrome.runtime.sendMessage({
-    type: "QB_OFFSCREEN_MODEL_STATUS",
-    modelId: message.modelId
-  });
+  const documentCreated = await ensureOffscreenDocument();
+  try {
+    return await chrome.runtime.sendMessage({
+      type: "QB_OFFSCREEN_MODEL_STATUS",
+      modelId: message.modelId
+    });
+  } finally {
+    if (documentCreated) {
+      await closeOffscreenDocument();
+    }
+  }
+}
+
+async function handleReleaseResources() {
+  if (processingRequestId) {
+    return {
+      ok: false,
+      busy: true,
+      error: "Local processing is still running."
+    };
+  }
+
+  if (
+    typeof chrome.offscreen?.hasDocument === "function" &&
+    !(await chrome.offscreen.hasDocument())
+  ) {
+    return { ok: true };
+  }
+
+  try {
+    return await chrome.runtime.sendMessage({
+      type: "QB_OFFSCREEN_RELEASE_RESOURCES"
+    });
+  } finally {
+    await closeOffscreenDocument();
+  }
 }
 
 async function handlePrepareModel(message, sender) {
@@ -263,13 +307,13 @@ function validateRect(rect) {
 async function ensureOffscreenDocument() {
   if (typeof chrome.offscreen?.hasDocument === "function") {
     if (await chrome.offscreen.hasDocument()) {
-      return;
+      return false;
     }
   } else {
     const offscreenUrl = chrome.runtime.getURL(OFFSCREEN_DOCUMENT_PATH);
     const clients = await self.clients.matchAll();
     if (clients.some((client) => client.url === offscreenUrl)) {
-      return;
+      return false;
     }
   }
 
@@ -280,10 +324,23 @@ async function ensureOffscreenDocument() {
       justification:
         "Process screenshot image with canvas, OCR, and local WebLLM inference."
     });
+    return true;
   } catch (error) {
     // Concurrent requests can both observe that no document exists.
     if (!String(error.message).includes("Only a single offscreen")) {
       throw error;
     }
+    return false;
   }
+}
+
+async function closeOffscreenDocument() {
+  if (
+    typeof chrome.offscreen?.hasDocument === "function" &&
+    !(await chrome.offscreen.hasDocument())
+  ) {
+    return;
+  }
+
+  await chrome.offscreen.closeDocument();
 }

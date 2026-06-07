@@ -10,7 +10,11 @@ import {
 
 test("model selection falls back to the balanced profile", () => {
   assert.equal(getModelProfile("missing-model").id, DEFAULT_MODEL_ID);
-  assert.equal(MODEL_PROFILES.length, 2);
+  assert.equal(MODEL_PROFILES.length, 3);
+  assert.equal(getModelProfile(DEFAULT_MODEL_ID).label, "Balanced");
+  assert.match(MODEL_PROFILES[0].label, /Lower Accuracy/);
+  assert.match(MODEL_PROFILES[2].label, /Recommended/);
+  assert.equal(MODEL_PROFILES[2].parameterLabel, "3B");
 });
 
 test("OCR language selection maps auto to Vietnamese and English", () => {
