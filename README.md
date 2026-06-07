@@ -1,7 +1,7 @@
 # QuizBuddy AI
 
-Privacy-first Chrome extension for analyzing multiple-choice questions with
-local OCR and browser-based WebLLM inference.
+Privacy-first Chrome extension for answering cropped questions with local OCR
+and browser-based WebLLM inference.
 
 QuizBuddy AI captures a user-selected region of the visible tab, extracts
 Vietnamese or English text with Tesseract.js, and uses a selected local Qwen2.5 model to
@@ -22,7 +22,7 @@ model setup, and result-rendering flows are implemented.
 - Selectable OCR language and editable OCR text
 - Browser-local WebLLM inference through WebGPU
 - Explicit consent before downloading model weights
-- Fast (0.5B) and Balanced (1.5B) local model profiles
+- Fast 0.5B, Balanced 1.5B, and Accurate 3B local model profiles
 - Model cache status, retry, switching, and deletion controls
 - `Alt+Shift+Q` crop shortcut
 - Full answer text instead of invented A/B/C/D labels
@@ -62,12 +62,18 @@ The repository root is source code. Always load `dist/` in Chrome.
 4. Review the local model notice and click the download button yourself.
 5. Wait for model setup to complete.
 6. Click **Crop Question**.
-7. Drag over the complete question and its answer choices.
+7. Drag over the question. Include answer choices when they exist, but
+   question-only crops are also supported.
 8. Correct the OCR text if needed and click **Analyze Again**.
 9. Review the suggested answer and explanation.
 
 Press `Alt+Shift+Q` to start cropping and `Escape` to cancel crop mode. Chrome
 allows changing the shortcut at `chrome://extensions/shortcuts`.
+
+Drag the floating icon toward the right edge to collapse it into a small edge
+handle. Click the handle to expand the icon, then click the icon to open
+QuizBuddy AI. A normal click still opens the sidebar, while a completed drag
+does not trigger it accidentally. The docked state is saved in Chrome storage.
 
 ## Model Download
 
@@ -76,8 +82,10 @@ language data, and the compatible WebLLM runtime are bundled into `dist/`.
 During a source build, the official runtime artifact is downloaded when absent
 and verified against a pinned SHA-256 checksum.
 
-The Fast profile uses Qwen2.5 0.5B with lower memory use. The Balanced profile
-uses Qwen2.5 1.5B for better analysis quality. QuizBuddy AI never starts a
+The Fast profile uses Qwen2.5 0.5B with lower memory use. Balanced uses
+Qwen2.5 1.5B for moderate reasoning on constrained devices. The recommended
+Accurate profile uses Qwen2.5 3B and about 2.5 GB of GPU memory for materially
+stronger reasoning. QuizBuddy AI never starts a
 model download automatically. The user must select a model and click its
 download button. Selected model weights are then downloaded from the official
 MLC model repository and cached by WebLLM in Chrome Cache Storage for the
@@ -139,6 +147,37 @@ that Shadow Root.
 Website resets, framework styles, inherited fonts, and global selectors cannot
 normally override the extension UI. The light DOM contains only a protected
 host element with critical inline `!important` layout declarations.
+
+## Resource Lifecycle
+
+WebLLM and OCR are intentionally loaded in the offscreen document, not in the
+webpage content script. To reduce impact on the active page:
+
+- Only one Tesseract worker is kept at a time, even when OCR language changes.
+- Closing the sidebar releases WebLLM GPU memory and terminates the OCR worker.
+- Resources are also released shortly after a completed OCR/AI task.
+- A temporary offscreen document used only for cache inspection is closed
+  immediately after the check.
+
+Local processing can still temporarily use substantial CPU, RAM, and GPU while
+OCR or inference is actively running.
+
+## Answer Accuracy
+
+For the best available local accuracy:
+
+- Use **Accurate (Recommended)** for the strongest available local reasoning.
+- Treat **Balanced** as a memory-conscious compromise, not a high-accuracy model.
+- Select the question's specific OCR language when it is known.
+- Include the complete question. Include every answer choice when the source
+  is multiple-choice.
+- Correct OCR mistakes and use **Analyze Again** before trusting a low-confidence result.
+
+Inference uses deterministic decoding, a 4096-token context window, and an
+accuracy prompt that requires independent solving and comparison against every
+visible choice. If no choices are visible, it switches to direct-answer
+behavior and returns the answer content with no option label. The extension
+still cannot guarantee a correct answer.
 
 ## OCR
 
