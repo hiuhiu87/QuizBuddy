@@ -10,9 +10,25 @@ chrome.action.onClicked.addListener((tab) => {
   }
 });
 
+chrome.commands.onCommand.addListener(async (command) => {
+  if (command !== "start-crop") {
+    return;
+  }
+
+  const [tab] = await chrome.tabs.query({
+    active: true,
+    currentWindow: true
+  });
+  if (Number.isInteger(tab?.id)) {
+    chrome.tabs
+      .sendMessage(tab.id, { type: "QB_START_CROP" })
+      .catch(() => {});
+  }
+});
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "QB_GET_MODEL_STATUS") {
-    handleGetModelStatus()
+    handleGetModelStatus(message)
       .then(sendResponse)
       .catch((error) => {
         sendResponse({
@@ -50,6 +66,32 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === "QB_ANALYZE_TEXT_LOCAL") {
+    handleLocalTask(message, sender, "QB_OFFSCREEN_ANALYZE_TEXT")
+      .then(sendResponse)
+      .catch((error) => {
+        sendResponse({
+          ok: false,
+          error: error.message || "Could not analyze the edited OCR text."
+        });
+      });
+
+    return true;
+  }
+
+  if (message.type === "QB_DELETE_MODEL") {
+    handleLocalTask(message, sender, "QB_OFFSCREEN_DELETE_MODEL")
+      .then(sendResponse)
+      .catch((error) => {
+        sendResponse({
+          ok: false,
+          error: error.message || "Could not delete the local model."
+        });
+      });
+
+    return true;
+  }
+
   if (
     message.type === "QB_PROCESS_PROGRESS" ||
     message.type === "QB_PROCESS_PARTIAL"
@@ -63,10 +105,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return false;
 });
 
-async function handleGetModelStatus() {
+async function handleGetModelStatus(message) {
   await ensureOffscreenDocument();
   return chrome.runtime.sendMessage({
-    type: "QB_OFFSCREEN_MODEL_STATUS"
+    type: "QB_OFFSCREEN_MODEL_STATUS",
+    modelId: message.modelId
   });
 }
 
@@ -91,7 +134,8 @@ async function handlePrepareModel(message, sender) {
     await ensureOffscreenDocument();
     const response = await chrome.runtime.sendMessage({
       type: "QB_OFFSCREEN_PREPARE_MODEL",
-      requestId
+      requestId,
+      modelId: message.modelId
     });
 
     if (!response) {
@@ -154,11 +198,50 @@ async function handleCaptureProcessLocal(message, sender) {
       type: "QB_OFFSCREEN_PROCESS_IMAGE",
       requestId,
       screenshotDataUrl,
-      rect: message.rect
+      rect: message.rect,
+      modelId: message.modelId,
+      ocrLanguage: message.ocrLanguage
     });
 
     if (!response) {
       throw new Error("The offscreen document did not return a processing result.");
+    }
+
+    return response;
+  } finally {
+    activeRequests.delete(requestId);
+    if (processingRequestId === requestId) {
+      processingRequestId = null;
+    }
+  }
+}
+
+async function handleLocalTask(message, sender, offscreenType) {
+  const tabId = sender.tab?.id;
+  const requestId = String(message.requestId || "");
+
+  if (!Number.isInteger(tabId) || !requestId) {
+    throw new Error("Cannot run this local task from the current page.");
+  }
+
+  if (processingRequestId) {
+    throw new Error(
+      "QuizBuddy AI is busy with another local processing task."
+    );
+  }
+
+  processingRequestId = requestId;
+  activeRequests.set(requestId, tabId);
+
+  try {
+    await ensureOffscreenDocument();
+    const response = await chrome.runtime.sendMessage({
+      ...message,
+      type: offscreenType
+    });
+
+    if (!response) {
+      throw new Error("The offscreen document did not return a result.");
     }
 
     return response;

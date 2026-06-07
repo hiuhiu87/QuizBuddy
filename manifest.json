@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "QuizBuddy AI",
-  "version": "0.7.0",
+  "version": "0.8.1",
   "minimum_chrome_version": "116",
   "description": "Crop multiple-choice questions and analyze them locally with OCR and WebLLM.",
   "permissions": [
@@ -42,6 +42,15 @@
       "32": "assets/icon-32.png",
       "48": "assets/icon-48.png",
       "128": "assets/icon-128.png"
+    }
+  },
+  "commands": {
+    "start-crop": {
+      "suggested_key": {
+        "default": "Alt+Shift+Q",
+        "mac": "Alt+Shift+Q"
+      },
+      "description": "Start cropping a question"
     }
   },
   "content_security_policy": {
