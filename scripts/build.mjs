@@ -10,24 +10,14 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
+import { MODEL_PROFILES } from "../lib/app-config.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dist = path.join(root, "dist");
-const webllmRuntimeName =
-  "Qwen2-1.5B-Instruct-q4f16_1-ctx4k_cs1k-webgpu.wasm";
-const webllmRuntimePath = path.join(
-  root,
-  "vendor",
-  "webllm",
-  webllmRuntimeName
-);
-const webllmRuntimeUrl =
-  "https://raw.githubusercontent.com/mlc-ai/binary-mlc-llm-libs/main/web-llm-models/v0_2_48/" +
-  webllmRuntimeName;
-const webllmRuntimeSha256 =
-  "14ef8ff95b20cc099df70d365babd18dc8023936eeacc2f459bac21e0a4f9dfa";
+const webllmRuntimeBaseUrl =
+  "https://raw.githubusercontent.com/mlc-ai/binary-mlc-llm-libs/main/web-llm-models/v0_2_48/";
 
-await ensureWebLLMRuntime();
+await Promise.all(MODEL_PROFILES.map(ensureWebLLMRuntime));
 
 await rm(dist, { recursive: true, force: true });
 await mkdir(path.join(dist, "content"), { recursive: true });
@@ -48,18 +38,10 @@ await Promise.all([
       path.join(dist, "assets", `icon-${size}.png`)
     )
   ),
-  cp(
-    path.join(
-      root,
-      "vendor",
-      "webllm",
-      webllmRuntimeName
-    ),
-    path.join(
-      dist,
-      "vendor",
-      "webllm",
-      webllmRuntimeName
+  ...MODEL_PROFILES.map((profile) =>
+    cp(
+      path.join(root, "vendor", "webllm", profile.runtimeFile),
+      path.join(dist, "vendor", "webllm", profile.runtimeFile)
     )
   ),
   cp(
@@ -141,12 +123,20 @@ await build({
 
 const manifestPath = path.join(dist, "manifest.json");
 const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
-manifest.version = "0.7.0";
+manifest.version = "0.8.1";
 await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 
 console.log(`Built QuizBuddy AI extension at ${dist}`);
 
-async function ensureWebLLMRuntime() {
+async function ensureWebLLMRuntime(profile) {
+  const webllmRuntimeName = profile.runtimeFile;
+  const webllmRuntimePath = path.join(
+    root,
+    "vendor",
+    "webllm",
+    webllmRuntimeName
+  );
+  const webllmRuntimeUrl = webllmRuntimeBaseUrl + webllmRuntimeName;
   await mkdir(path.dirname(webllmRuntimePath), { recursive: true });
 
   try {
@@ -167,9 +157,9 @@ async function ensureWebLLMRuntime() {
 
   const runtime = await readFile(webllmRuntimePath);
   const checksum = createHash("sha256").update(runtime).digest("hex");
-  if (checksum !== webllmRuntimeSha256) {
+  if (checksum !== profile.runtimeSha256) {
     throw new Error(
-      `WebLLM runtime checksum mismatch. Expected ${webllmRuntimeSha256}, received ${checksum}.`
+      `WebLLM runtime checksum mismatch. Expected ${profile.runtimeSha256}, received ${checksum}.`
     );
   }
 }

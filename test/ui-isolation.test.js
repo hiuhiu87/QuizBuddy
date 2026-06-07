@@ -36,3 +36,20 @@ test("floating and toolbar buttons use packaged icons", async () => {
   assert.equal(manifest.action.default_icon["32"], "assets/icon-32.png");
   assert.equal(manifest.icons["128"], "assets/icon-128.png");
 });
+
+test("manifest exposes the crop keyboard shortcut", async () => {
+  const manifest = JSON.parse(await readFile("manifest.json", "utf8"));
+
+  assert.equal(
+    manifest.commands["start-crop"].suggested_key.default,
+    "Alt+Shift+Q"
+  );
+});
+
+test("model download requires an explicit user click", async () => {
+  const source = await readFile("content/content.js", "utf8");
+
+  assert.doesNotMatch(source, /prepareLocalModel\(true\)/);
+  assert.match(source, /Nothing is downloaded until you click the button below/);
+  assert.match(source, /chrome-extension:\/\/\$\{chrome\.runtime\.id\}/);
+});

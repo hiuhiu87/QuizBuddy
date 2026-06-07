@@ -1,25 +1,31 @@
-import { CreateMLCEngine, hasModelInCache } from "@mlc-ai/web-llm";
+import {
+  CreateMLCEngine,
+  deleteModelAllInfoInCache,
+  hasModelInCache
+} from "@mlc-ai/web-llm";
 import { createWorker } from "tesseract.js";
+import {
+  MODEL_PROFILES,
+  getModelProfile,
+  getTesseractLanguages,
+  normalizeOCRLanguage
+} from "./lib/app-config.js";
 import {
   calculateCropPixels,
   normalizeOCRText,
   parseAIResult
 } from "./lib/processing-utils.js";
 
-const WEBLLM_MODEL_ID = "Qwen2.5-1.5B-Instruct-q4f16_1-MLC";
-const WEBLLM_MODEL_URL =
-  "https://huggingface.co/mlc-ai/Qwen2.5-1.5B-Instruct-q4f16_1-MLC";
-const WEBLLM_MODEL_LIB =
-  "vendor/webllm/Qwen2-1.5B-Instruct-q4f16_1-ctx4k_cs1k-webgpu.wasm";
 const MIN_OCR_TEXT_LENGTH = 8;
 
 let webllmEnginePromise = null;
-let ocrWorkerPromise = null;
+let loadedModelId = null;
+const ocrWorkerPromises = new Map();
 let activeRequestId = null;
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "QB_OFFSCREEN_MODEL_STATUS") {
-    getModelStatus()
+    getModelStatus(message.modelId)
       .then(sendResponse)
       .catch((error) => {
         sendResponse({
@@ -32,7 +38,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === "QB_OFFSCREEN_PREPARE_MODEL") {
-    prepareModel(message.requestId)
+    prepareModel(message.requestId, message.modelId)
       .then(sendResponse)
       .catch((error) => {
         sendResponse({
@@ -57,20 +63,66 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === "QB_OFFSCREEN_ANALYZE_TEXT") {
+    analyzeEditedText(message)
+      .then(sendResponse)
+      .catch((error) => {
+        sendResponse({
+          ok: false,
+          stage: "webllm",
+          error: error.message || "Could not analyze the edited OCR text."
+        });
+      });
+
+    return true;
+  }
+
+  if (message.type === "QB_OFFSCREEN_DELETE_MODEL") {
+    deleteLocalModel(message)
+      .then(sendResponse)
+      .catch((error) => {
+        sendResponse({
+          ok: false,
+          error: error.message || "Could not delete the local model."
+        });
+      });
+
+    return true;
+  }
+
   return false;
 });
 
-async function getModelStatus() {
-  const cached = await hasModelInCache(WEBLLM_MODEL_ID, getWebLLMAppConfig());
+async function getModelStatus(modelId) {
+  const selectedProfile = getModelProfile(modelId);
+  const models = await Promise.all(
+    MODEL_PROFILES.map(async (profile) => ({
+      id: profile.id,
+      label: profile.label,
+      description: profile.description,
+      vramRequiredMB: profile.vramRequiredMB,
+      cached: await hasModelInCache(profile.id, getWebLLMAppConfig())
+    }))
+  );
+  const selectedModel = models.find(
+    (model) => model.id === selectedProfile.id
+  );
+
   return {
     ok: true,
-    cached,
-    ready: Boolean(webllmEnginePromise && cached),
-    webgpuAvailable: Boolean(navigator.gpu)
+    cached: selectedModel.cached,
+    ready: Boolean(
+      webllmEnginePromise &&
+        loadedModelId === selectedProfile.id &&
+        selectedModel.cached
+    ),
+    webgpuAvailable: Boolean(navigator.gpu),
+    selectedModel,
+    models
   };
 }
 
-async function prepareModel(requestId) {
+async function prepareModel(requestId, modelId) {
   if (!navigator.gpu) {
     throw new Error(
       "WebGPU is not available. Enable browser hardware acceleration and restart Chrome/Edge."
@@ -84,19 +136,27 @@ async function prepareModel(requestId) {
       "Preparing the local AI model. Keep this browser open...",
       0
     );
-    await getWebLLMEngine();
+    const profile = getModelProfile(modelId);
+    await getWebLLMEngine(profile.id);
     reportProgress("model-ready", "Local AI model is ready.", 1);
     return {
       ok: true,
       cached: true,
-      ready: true
+      ready: true,
+      modelId: profile.id
     };
   } finally {
     activeRequestId = null;
   }
 }
 
-async function processImageLocally({ requestId, screenshotDataUrl, rect }) {
+async function processImageLocally({
+  requestId,
+  screenshotDataUrl,
+  rect,
+  modelId,
+  ocrLanguage
+}) {
   if (!screenshotDataUrl || !rect) {
     throw new Error("Screenshot data or crop coordinates are missing.");
   }
@@ -111,7 +171,9 @@ async function processImageLocally({ requestId, screenshotDataUrl, rect }) {
     let ocrText;
     try {
       reportProgress("ocr", "Running OCR locally...", 0.12);
-      ocrText = normalizeOCRText(await runLocalOCR(croppedImageDataUrl));
+      ocrText = normalizeOCRText(
+        await runLocalOCR(croppedImageDataUrl, ocrLanguage)
+      );
       reportPartial({ ocrText });
     } catch (error) {
       return {
@@ -135,7 +197,7 @@ async function processImageLocally({ requestId, screenshotDataUrl, rect }) {
 
     try {
       reportProgress("webllm", "Analyzing with local WebLLM...", 0.55);
-      const aiResult = await runWebLLMAnalysis(ocrText);
+      const aiResult = await runWebLLMAnalysis(ocrText, modelId);
       reportProgress("done", "Done.", 1);
       return {
         ok: true,
@@ -152,6 +214,53 @@ async function processImageLocally({ requestId, screenshotDataUrl, rect }) {
         ocrText
       };
     }
+  } finally {
+    activeRequestId = null;
+  }
+}
+
+async function analyzeEditedText({ requestId, ocrText, modelId }) {
+  const normalizedText = normalizeOCRText(ocrText || "");
+  if (normalizedText.length < MIN_OCR_TEXT_LENGTH) {
+    throw new Error(
+      "Edited OCR text is too short. Enter the complete question before analyzing again."
+    );
+  }
+
+  activeRequestId = requestId;
+  try {
+    reportProgress("webllm", "Analyzing edited text locally...", 0.1);
+    const aiResult = await runWebLLMAnalysis(normalizedText, modelId);
+    reportProgress("done", "Done.", 1);
+    return {
+      ok: true,
+      ocrText: normalizedText,
+      aiResult
+    };
+  } finally {
+    activeRequestId = null;
+  }
+}
+
+async function deleteLocalModel({ requestId, modelId }) {
+  const profile = getModelProfile(modelId);
+  activeRequestId = requestId;
+
+  try {
+    reportProgress("model-delete", `Removing ${profile.label} model cache...`, 0);
+    if (loadedModelId === profile.id && webllmEnginePromise) {
+      const engine = await webllmEnginePromise;
+      await engine.unload();
+      webllmEnginePromise = null;
+      loadedModelId = null;
+    }
+
+    await deleteModelAllInfoInCache(profile.id, getWebLLMAppConfig());
+    reportProgress("model-deleted", `${profile.label} model cache removed.`, 1);
+    return {
+      ok: true,
+      modelId: profile.id
+    };
   } finally {
     activeRequestId = null;
   }
@@ -192,8 +301,8 @@ function loadImage(dataUrl) {
   });
 }
 
-async function runLocalOCR(croppedImageDataUrl) {
-  const worker = await getOCRWorker();
+async function runLocalOCR(croppedImageDataUrl, language) {
+  const worker = await getOCRWorker(language);
   const grayscaleImage = await prepareImageForOCR(
     croppedImageDataUrl,
     "grayscale"
@@ -218,20 +327,24 @@ async function runLocalOCR(croppedImageDataUrl) {
   return bestResult?.data?.text || "";
 }
 
-async function getOCRWorker() {
-  if (!ocrWorkerPromise) {
-    ocrWorkerPromise = createOCRWorker().catch((error) => {
-      ocrWorkerPromise = null;
+async function getOCRWorker(language) {
+  const normalizedLanguage = normalizeOCRLanguage(language);
+  const tesseractLanguages = getTesseractLanguages(normalizedLanguage);
+
+  if (!ocrWorkerPromises.has(tesseractLanguages)) {
+    const workerPromise = createOCRWorker(tesseractLanguages).catch((error) => {
+      ocrWorkerPromises.delete(tesseractLanguages);
       throw error;
     });
+    ocrWorkerPromises.set(tesseractLanguages, workerPromise);
   }
 
-  return ocrWorkerPromise;
+  return ocrWorkerPromises.get(tesseractLanguages);
 }
 
-async function createOCRWorker() {
+async function createOCRWorker(tesseractLanguages) {
   try {
-    const worker = await createWorker("vie+eng", 1, {
+    const worker = await createWorker(tesseractLanguages, 1, {
       workerPath: chrome.runtime.getURL("vendor/ocr/worker.min.js"),
       corePath: chrome.runtime.getURL("vendor/ocr/core"),
       langPath: chrome.runtime.getURL("vendor/ocr/lang-data"),
@@ -338,15 +451,16 @@ function scoreOCRResult(result) {
   return confidence + Math.min(20, meaningfulCharacters / 5) + vietnameseMarks;
 }
 
-async function runWebLLMAnalysis(ocrText) {
+async function runWebLLMAnalysis(ocrText, modelId) {
   if (!navigator.gpu) {
     throw new Error(
       "WebGPU is not available in this browser. Use a supported Chrome/Edge version and enable hardware acceleration."
     );
   }
 
+  const profile = getModelProfile(modelId);
   const modelCached = await hasModelInCache(
-    WEBLLM_MODEL_ID,
+    profile.id,
     getWebLLMAppConfig()
   );
   if (!modelCached) {
@@ -355,7 +469,7 @@ async function runWebLLMAnalysis(ocrText) {
     );
   }
 
-  const engine = await getWebLLMEngine();
+  const engine = await getWebLLMEngine(profile.id);
   const response = await engine.chat.completions.create({
     messages: [
       {
@@ -372,10 +486,20 @@ async function runWebLLMAnalysis(ocrText) {
   return parseAIResult(content, ocrText);
 }
 
-async function getWebLLMEngine() {
+async function getWebLLMEngine(modelId) {
+  const profile = getModelProfile(modelId);
+  if (webllmEnginePromise && loadedModelId !== profile.id) {
+    const previousEngine = await webllmEnginePromise;
+    await previousEngine.unload();
+    webllmEnginePromise = null;
+    loadedModelId = null;
+  }
+
   if (!webllmEnginePromise) {
-    webllmEnginePromise = createWebLLMEngine().catch((error) => {
+    loadedModelId = profile.id;
+    webllmEnginePromise = createWebLLMEngine(profile).catch((error) => {
       webllmEnginePromise = null;
+      loadedModelId = null;
       throw error;
     });
   }
@@ -383,10 +507,10 @@ async function getWebLLMEngine() {
   return webllmEnginePromise;
 }
 
-async function createWebLLMEngine() {
+async function createWebLLMEngine(profile) {
   try {
     return await CreateMLCEngine(
-      WEBLLM_MODEL_ID,
+      profile.id,
       {
         appConfig: getWebLLMAppConfig(),
         initProgressCallback: (report) => {
@@ -410,18 +534,19 @@ async function createWebLLMEngine() {
 
 function getWebLLMAppConfig() {
   return {
-    model_list: [
-      {
-        model: WEBLLM_MODEL_URL,
-        model_id: WEBLLM_MODEL_ID,
-        model_lib: chrome.runtime.getURL(WEBLLM_MODEL_LIB),
+    useIndexedDBCache: false,
+    model_list: MODEL_PROFILES.map((profile) => ({
+        model: profile.modelUrl,
+        model_id: profile.id,
+        model_lib: chrome.runtime.getURL(
+          `vendor/webllm/${profile.runtimeFile}`
+        ),
         low_resource_required: true,
-        vram_required_MB: 1629.75,
+        vram_required_MB: profile.vramRequiredMB,
         overrides: {
           context_window_size: 2048
         }
-      }
-    ]
+      }))
   };
 }
 

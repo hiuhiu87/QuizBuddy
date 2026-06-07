@@ -1,5 +1,13 @@
 import extensionStyles from "./content.css";
 import floatingIconUrl from "../assets/icon.png";
+import {
+  DEFAULT_MODEL_ID,
+  DEFAULT_OCR_LANGUAGE,
+  MODEL_PROFILES,
+  OCR_LANGUAGE_OPTIONS,
+  getModelProfile,
+  normalizeOCRLanguage
+} from "../lib/app-config.js";
 
 (() => {
   if (window.__quizBuddyInjected) {
@@ -15,8 +23,13 @@ import floatingIconUrl from "../assets/icon.png";
   let modelRequestId = null;
   let modelReady = false;
   let modelStatusChecked = false;
+  let selectedModelCached = false;
+  let selectedModelId = DEFAULT_MODEL_ID;
+  let selectedOcrLanguage = DEFAULT_OCR_LANGUAGE;
+  let preferencesLoadedPromise = null;
 
-  const MODEL_CONSENT_KEY = "qbModelDownloadApproved";
+  const MODEL_SELECTION_KEY = "qbSelectedModelId";
+  const OCR_LANGUAGE_KEY = "qbOcrLanguage";
   const host = document.createElement("div");
   host.id = "quizbuddy-ai-root";
   setProtectedHostStyles(host);
@@ -49,12 +62,22 @@ import floatingIconUrl from "../assets/icon.png";
     </div>
     <div class="qb-sidebar-body">
       <section class="qb-model-card">
-        <div class="qb-model-card-title">Local AI Model Required</div>
+        <div class="qb-model-card-title">Local AI Model</div>
+        <label class="qb-field-label" for="qb-model-select">Model</label>
+        <select id="qb-model-select" class="qb-select qb-model-select">
+          ${MODEL_PROFILES.map(
+            (profile) =>
+              `<option value="${profile.id}">${profile.label} - Qwen2.5 ${profile.id.includes("0.5B") ? "0.5B" : "1.5B"}</option>`
+          ).join("")}
+        </select>
         <div class="qb-model-card-text">
-          QuizBuddy AI uses Qwen2.5 1.5B locally. Initial setup downloads about
-          880 MB of model data and needs about 1.63 GB of GPU memory. Question
-          text is not sent to an external AI API.
+          Checking local model status...
         </div>
+        <div class="qb-model-storage-note">
+          Model weights are stored in Chrome Cache Storage under
+          <span class="qb-model-storage-origin"></span>, not in your Downloads folder.
+        </div>
+        <div class="qb-model-cache-summary"></div>
         <div class="qb-model-progress qb-hidden" aria-hidden="true">
           <div class="qb-model-progress-bar"></div>
         </div>
@@ -63,7 +86,19 @@ import floatingIconUrl from "../assets/icon.png";
             Download Local Model
           </button>
           <button class="qb-model-later-button" type="button">Not Now</button>
+          <button class="qb-model-delete-button qb-hidden" type="button">
+            Delete Cache
+          </button>
         </div>
+      </section>
+      <section class="qb-settings-row">
+        <label class="qb-field-label" for="qb-ocr-language">OCR Language</label>
+        <select id="qb-ocr-language" class="qb-select qb-ocr-language">
+          ${OCR_LANGUAGE_OPTIONS.map(
+            (option) =>
+              `<option value="${option.id}">${option.label}</option>`
+          ).join("")}
+        </select>
       </section>
       <button class="qb-crop-button" type="button">Crop Question</button>
       <div class="qb-status" role="status">Ready to crop a question.</div>
@@ -73,7 +108,8 @@ import floatingIconUrl from "../assets/icon.png";
       </section>
       <section class="qb-section qb-ocr-section qb-hidden">
         <h2 class="qb-section-title">OCR Text</h2>
-        <div class="qb-ocr-text"></div>
+        <textarea class="qb-ocr-textarea" rows="8" spellcheck="true"></textarea>
+        <button class="qb-analyze-button" type="button">Analyze Again</button>
       </section>
       <section class="qb-section qb-result-section qb-hidden">
         <h2 class="qb-section-title">AI Result</h2>
@@ -90,6 +126,11 @@ import floatingIconUrl from "../assets/icon.png";
   const modelCard = sidebar.querySelector(".qb-model-card");
   const modelCardTitle = sidebar.querySelector(".qb-model-card-title");
   const modelCardText = sidebar.querySelector(".qb-model-card-text");
+  const modelStorageOrigin = sidebar.querySelector(
+    ".qb-model-storage-origin"
+  );
+  const modelCacheSummary = sidebar.querySelector(".qb-model-cache-summary");
+  const modelSelect = sidebar.querySelector(".qb-model-select");
   const modelProgress = sidebar.querySelector(".qb-model-progress");
   const modelProgressBar = sidebar.querySelector(".qb-model-progress-bar");
   const modelActions = sidebar.querySelector(".qb-model-actions");
@@ -97,17 +138,22 @@ import floatingIconUrl from "../assets/icon.png";
     ".qb-model-download-button"
   );
   const modelLaterButton = sidebar.querySelector(".qb-model-later-button");
+  const modelDeleteButton = sidebar.querySelector(".qb-model-delete-button");
+  const ocrLanguageSelect = sidebar.querySelector(".qb-ocr-language");
   const cropButton = sidebar.querySelector(".qb-crop-button");
   const status = sidebar.querySelector(".qb-status");
   const previewSection = sidebar.querySelector(".qb-preview-section");
   const previewImage = sidebar.querySelector(".qb-preview-image");
   const ocrSection = sidebar.querySelector(".qb-ocr-section");
-  const ocrText = sidebar.querySelector(".qb-ocr-text");
+  const ocrTextarea = sidebar.querySelector(".qb-ocr-textarea");
+  const analyzeButton = sidebar.querySelector(".qb-analyze-button");
   const resultSection = sidebar.querySelector(".qb-result-section");
   const resultCard = sidebar.querySelector(".qb-result-card");
   const errorCard = sidebar.querySelector(".qb-error-card");
 
   cropButton.disabled = true;
+  analyzeButton.disabled = true;
+  modelStorageOrigin.textContent = `chrome-extension://${chrome.runtime.id}`;
 
   floatingButton.addEventListener("click", async () => {
     const willOpen = !sidebar.classList.contains("qb-sidebar-open");
@@ -122,15 +168,24 @@ import floatingIconUrl from "../assets/icon.png";
   });
 
   cropButton.addEventListener("click", startCropMode);
+  analyzeButton.addEventListener("click", analyzeEditedOCRText);
   modelDownloadButton.addEventListener("click", () => {
-    prepareLocalModel(false);
+    prepareLocalModel();
   });
   modelLaterButton.addEventListener("click", postponeModelDownload);
+  modelDeleteButton.addEventListener("click", deleteSelectedModel);
+  modelSelect.addEventListener("change", onModelSelectionChange);
+  ocrLanguageSelect.addEventListener("change", onOCRLanguageChange);
 
   chrome.runtime.onMessage.addListener(message => {
     if (message.type === "QB_OPEN_SIDEBAR") {
       sidebar.classList.add("qb-sidebar-open");
       ensureModelOnboarding();
+    }
+
+    if (message.type === "QB_START_CROP") {
+      sidebar.classList.add("qb-sidebar-open");
+      startCropFromShortcut();
     }
 
     if (message.type === "QB_CAPTURE_FINISHED") {
@@ -163,6 +218,13 @@ import floatingIconUrl from "../assets/icon.png";
       renderPartialResult(message);
     }
   });
+
+  async function startCropFromShortcut() {
+    await ensureModelOnboarding();
+    if (modelReady) {
+      startCropMode();
+    }
+  }
 
   function startCropMode() {
     if (!modelReady) {
@@ -253,6 +315,8 @@ import floatingIconUrl from "../assets/icon.png";
       const response = await chrome.runtime.sendMessage({
         type: "QB_CAPTURE_PROCESS_LOCAL",
         requestId: activeRequestId,
+        modelId: selectedModelId,
+        ocrLanguage: selectedOcrLanguage,
         rect: {
           ...rect,
           devicePixelRatio: window.devicePixelRatio || 1,
@@ -327,7 +391,7 @@ import floatingIconUrl from "../assets/icon.png";
     }
 
     if (result.ocrText) {
-      ocrText.textContent = result.ocrText;
+      ocrTextarea.value = result.ocrText;
       ocrSection.classList.remove("qb-hidden");
     }
   }
@@ -362,7 +426,7 @@ import floatingIconUrl from "../assets/icon.png";
   function resetOutput() {
     clearError();
     previewImage.removeAttribute("src");
-    ocrText.textContent = "";
+    ocrTextarea.value = "";
     resultCard.replaceChildren();
     previewSection.classList.add("qb-hidden");
     ocrSection.classList.add("qb-hidden");
@@ -392,9 +456,14 @@ import floatingIconUrl from "../assets/icon.png";
   function setProcessingState(processing) {
     cropButton.disabled = processing || !modelReady;
     cropButton.textContent = processing ? "Processing..." : "Crop Question";
+    analyzeButton.disabled = processing || !modelReady;
+    analyzeButton.textContent = processing ? "Analyzing..." : "Analyze Again";
+    modelSelect.disabled = processing || Boolean(modelRequestId);
+    ocrLanguageSelect.disabled = processing;
   }
 
   async function ensureModelOnboarding() {
+    await loadPreferences();
     if (modelReady || modelRequestId) {
       return;
     }
@@ -410,11 +479,15 @@ import floatingIconUrl from "../assets/icon.png";
     try {
       const response = await chrome.runtime.sendMessage({
         type: "QB_GET_MODEL_STATUS",
+        modelId: selectedModelId
       });
 
       if (!response?.ok) {
         throw new Error(response?.error || "Could not check model status.");
       }
+
+      renderModelCacheSummary(response.models);
+      selectedModelCached = Boolean(response.cached);
 
       if (!response.webgpuAvailable) {
         setModelCardState(
@@ -425,30 +498,28 @@ import floatingIconUrl from "../assets/icon.png";
       }
 
       if (response.cached) {
-        await prepareLocalModel(true);
+        setModelCardState("cached");
         return;
       }
 
-      const storage = await chrome.storage.local.get(MODEL_CONSENT_KEY);
-      setModelCardState(storage[MODEL_CONSENT_KEY] ? "retry" : "permission");
+      setModelCardState("permission");
     } catch (error) {
       modelStatusChecked = false;
       setModelCardState("error", error.message);
     }
   }
 
-  async function prepareLocalModel(alreadyApproved) {
+  async function prepareLocalModel() {
     clearError();
-    if (!alreadyApproved) {
-      await chrome.storage.local.set({ [MODEL_CONSENT_KEY]: true });
-    }
     modelRequestId = crypto.randomUUID();
     setModelCardState("downloading");
+    setProcessingState(true);
 
     try {
       const response = await chrome.runtime.sendMessage({
         type: "QB_PREPARE_MODEL",
         requestId: modelRequestId,
+        modelId: selectedModelId
       });
 
       if (!response?.ok) {
@@ -456,16 +527,17 @@ import floatingIconUrl from "../assets/icon.png";
       }
 
       setModelReady();
+      await refreshModelStatusSummary();
     } catch (error) {
       setModelCardState("error", error.message);
       showError(`Local model setup failed: ${error.message}`);
     } finally {
       modelRequestId = null;
+      setProcessingState(false);
     }
   }
 
   async function postponeModelDownload() {
-    await chrome.storage.local.set({ [MODEL_CONSENT_KEY]: false });
     setModelCardState("postponed");
     setStatus("Model download postponed. Crop is disabled.");
   }
@@ -486,12 +558,15 @@ import floatingIconUrl from "../assets/icon.png";
     modelReady = true;
     modelStatusChecked = true;
     cropButton.disabled = false;
-    modelCardTitle.textContent = "Local AI Model Ready";
-    modelCardText.textContent =
-      "The model is cached locally and ready for question analysis.";
+    const profile = getModelProfile(selectedModelId);
+    modelCardTitle.textContent = `${profile.label} Model Ready`;
+    modelCardText.textContent = `${profile.description} Inference stays in this browser.`;
     modelProgressBar.style.width = "100%";
     modelProgress.classList.remove("qb-hidden");
-    modelActions.classList.add("qb-hidden");
+    modelActions.classList.remove("qb-hidden");
+    modelDownloadButton.classList.add("qb-hidden");
+    modelLaterButton.classList.add("qb-hidden");
+    modelDeleteButton.classList.remove("qb-hidden");
     modelCard.classList.add("qb-model-card-ready");
     setStatus("Ready to crop a question.");
   }
@@ -502,6 +577,9 @@ import floatingIconUrl from "../assets/icon.png";
     modelActions.classList.remove("qb-hidden");
     modelDownloadButton.disabled = false;
     modelLaterButton.disabled = false;
+    modelDeleteButton.disabled = false;
+    modelDownloadButton.classList.remove("qb-hidden");
+    modelDeleteButton.classList.add("qb-hidden");
     modelLaterButton.classList.remove("qb-hidden");
 
     if (state === "checking") {
@@ -513,9 +591,12 @@ import floatingIconUrl from "../assets/icon.png";
     }
 
     if (state === "downloading") {
-      modelCardTitle.textContent = "Preparing Local AI Model";
-      modelCardText.textContent =
-        "Starting the model download. Keep this browser open...";
+      modelCardTitle.textContent = selectedModelCached
+        ? "Loading Cached Model"
+        : "Downloading Selected Model";
+      modelCardText.textContent = selectedModelCached
+        ? "Loading the selected cached model into WebGPU..."
+        : "Downloading the model you selected. Keep this browser open...";
       modelProgressBar.style.width = "0%";
       modelProgress.classList.remove("qb-hidden");
       modelDownloadButton.disabled = true;
@@ -523,12 +604,14 @@ import floatingIconUrl from "../assets/icon.png";
       return;
     }
 
-    if (state === "retry") {
-      modelCardTitle.textContent = "Finish Local Model Setup";
+    if (state === "cached") {
+      const profile = getModelProfile(selectedModelId);
+      modelCardTitle.textContent = `${profile.label} Model Is Cached`;
       modelCardText.textContent =
-        "You previously approved the model download, but setup is not complete.";
-      modelDownloadButton.textContent = "Resume Model Setup";
-      modelLaterButton.textContent = "Not Now";
+        "The model is already stored by Chrome. Click below to load it into WebGPU for this session.";
+      modelDownloadButton.textContent = "Use Cached Model";
+      modelLaterButton.classList.add("qb-hidden");
+      modelDeleteButton.classList.remove("qb-hidden");
       return;
     }
 
@@ -551,12 +634,163 @@ import floatingIconUrl from "../assets/icon.png";
       return;
     }
 
+    const profile = getModelProfile(selectedModelId);
     modelCardTitle.textContent = "Download Local AI Model?";
     modelCardText.textContent =
-      "QuizBuddy AI uses Qwen2.5 1.5B locally. Initial setup downloads about 880 MB of model data and needs about 1.63 GB of GPU memory. Question text is not sent to an external AI API.";
-    modelDownloadButton.textContent = "Download Local Model";
+      `${profile.label}: ${profile.description} Requires about ${formatMemory(profile.vramRequiredMB)} of GPU memory. Nothing is downloaded until you click the button below.`;
+    modelDownloadButton.textContent = `Download ${profile.label} Model`;
     modelLaterButton.textContent = "Not Now";
     modelLaterButton.classList.remove("qb-hidden");
+  }
+
+  async function loadPreferences() {
+    if (!preferencesLoadedPromise) {
+      preferencesLoadedPromise = chrome.storage.local
+        .get([MODEL_SELECTION_KEY, OCR_LANGUAGE_KEY])
+        .then((storage) => {
+          selectedModelId = getModelProfile(
+            storage[MODEL_SELECTION_KEY]
+          ).id;
+          selectedOcrLanguage = normalizeOCRLanguage(
+            storage[OCR_LANGUAGE_KEY]
+          );
+          modelSelect.value = selectedModelId;
+          ocrLanguageSelect.value = selectedOcrLanguage;
+        });
+    }
+
+    return preferencesLoadedPromise;
+  }
+
+  async function onModelSelectionChange() {
+    selectedModelId = getModelProfile(modelSelect.value).id;
+    await chrome.storage.local.set({
+      [MODEL_SELECTION_KEY]: selectedModelId
+    });
+    modelReady = false;
+    modelStatusChecked = false;
+    selectedModelCached = false;
+    cropButton.disabled = true;
+    clearError();
+    await ensureModelOnboarding();
+  }
+
+  async function onOCRLanguageChange() {
+    selectedOcrLanguage = normalizeOCRLanguage(ocrLanguageSelect.value);
+    await chrome.storage.local.set({
+      [OCR_LANGUAGE_KEY]: selectedOcrLanguage
+    });
+  }
+
+  async function deleteSelectedModel() {
+    const profile = getModelProfile(selectedModelId);
+    if (
+      !window.confirm(
+        `Delete the cached ${profile.label} model weights from this browser?`
+      )
+    ) {
+      return;
+    }
+
+    modelRequestId = crypto.randomUUID();
+    setProcessingState(true);
+    clearError();
+    setStatus(`Deleting ${profile.label} model cache...`, true);
+
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: "QB_DELETE_MODEL",
+        requestId: modelRequestId,
+        modelId: selectedModelId
+      });
+      if (!response?.ok) {
+        throw new Error(response?.error || "Could not delete model cache.");
+      }
+
+      modelReady = false;
+      modelStatusChecked = false;
+      selectedModelCached = false;
+      setModelCardState("postponed");
+      setStatus(`${profile.label} model cache deleted.`);
+      await refreshModelStatusSummary();
+    } catch (error) {
+      showError(`Could not delete model cache: ${error.message}`);
+      setStatus("Model cache deletion failed.");
+    } finally {
+      modelRequestId = null;
+      setProcessingState(false);
+    }
+  }
+
+  async function analyzeEditedOCRText() {
+    const editedText = ocrTextarea.value.trim();
+    if (editedText.length < 8) {
+      showError(
+        "OCR text is too short. Enter the complete question before analyzing again."
+      );
+      return;
+    }
+
+    if (!modelReady || activeRequestId) {
+      showError("The local model is not ready or another task is running.");
+      return;
+    }
+
+    activeRequestId = crypto.randomUUID();
+    clearError();
+    resultSection.classList.add("qb-hidden");
+    resultCard.replaceChildren();
+    setProcessingState(true);
+    setStatus("Analyzing edited text locally...", true);
+
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: "QB_ANALYZE_TEXT_LOCAL",
+        requestId: activeRequestId,
+        modelId: selectedModelId,
+        ocrText: editedText
+      });
+      handleProcessingResponse(response);
+    } catch (error) {
+      showError(`Could not analyze edited text: ${error.message}`);
+      setStatus("Local AI analysis failed.");
+    } finally {
+      activeRequestId = null;
+      setProcessingState(false);
+    }
+  }
+
+  function renderModelCacheSummary(models = []) {
+    modelCacheSummary.replaceChildren(
+      ...models.map((model) => {
+        const row = createElement("div", "qb-model-cache-row");
+        row.append(
+          createElement("span", "", model.label),
+          createElement(
+            "span",
+            model.cached ? "qb-cache-ready" : "qb-cache-missing",
+            model.cached ? "Cached" : "Not downloaded"
+          )
+        );
+        return row;
+      })
+    );
+  }
+
+  async function refreshModelStatusSummary() {
+    const response = await chrome.runtime.sendMessage({
+      type: "QB_GET_MODEL_STATUS",
+      modelId: selectedModelId
+    });
+    if (response?.ok) {
+      renderModelCacheSummary(response.models);
+    }
+  }
+
+  function formatMemory(memoryMB) {
+    return memoryMB >= 1024
+      ? `${(memoryMB / 1024).toFixed(2)} GB`
+      : `${Math.round(memoryMB)} MB`;
   }
 
   function waitForBrowserPaint() {
