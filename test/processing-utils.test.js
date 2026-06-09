@@ -507,3 +507,24 @@ test("parseAIResult infers batch scopes when the model omits line references", (
   assert.deepEqual(result.questions[0].questionLineRefs, [1, 2, 3]);
   assert.deepEqual(result.questions[1].questionLineRefs, [4, 5, 6]);
 });
+
+test("parseAIResult resolves contradictions in single-select True/False questions containing typos", () => {
+  const result = parseAIResult(
+    JSON.stringify({
+      answerLabel: "A",
+      answerText: "Sai",
+      confidence: "high",
+      optionAnalysis: [
+        { label: "A", text: "Sai", isCorrect: true },
+        { label: "B", text: "Bung", isCorrect: true } // Contradictory option marked correct
+      ]
+    }),
+    "stdin mặc định la man hình.\nA. Sai\nB. Bung"
+  );
+
+  assert.equal(result.answerLabel, "A");
+  assert.equal(result.answerText, "Sai");
+  assert.equal(result.answerSelections.length, 1);
+  assert.equal(result.answerSelections[0].label, "A");
+  assert.equal(result.answerSelections[0].text, "Sai");
+});

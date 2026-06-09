@@ -106,7 +106,7 @@ await Promise.all(
         "node_modules",
         "@tesseract.js-data",
         language,
-        "4.0.0_best_int",
+        "4.0.0",
         `${language}.traineddata.gz`
       ),
       path.join(
