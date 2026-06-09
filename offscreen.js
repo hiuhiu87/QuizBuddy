@@ -729,11 +729,24 @@ async function runLocalOCR(croppedImageDataUrl, language) {
 
   reportProgress(
     "ocr",
-    "OCR confidence is low. Retrying with color details...",
+    "OCR confidence is low. Retrying with color details and automatic segmentation...",
     0.48
   );
   const colorImage = await prepareImageForOCR(croppedImageDataUrl, "color");
+  
+  // Set fallback parameters: switch to fully automatic page segmentation (PSM 3)
+  // to handle potentially complex layouts (e.g. columns, table-like choices, or multi-question batches).
+  await worker.setParameters({
+    tessedit_pageseg_mode: "3"
+  });
+
   const retryResult = await worker.recognize(colorImage);
+
+  // Restore default PSM 6 for future runs
+  await worker.setParameters({
+    tessedit_pageseg_mode: "6"
+  });
+
   const bestResult =
     scoreOCRResult(retryResult) > scoreOCRResult(primaryResult)
       ? retryResult
@@ -852,7 +865,7 @@ async function prepareImageForOCR(dataUrl, mode) {
     const normalizedGray = shouldInvert ? 255 - gray : gray;
     const contrasted = Math.max(
       0,
-      Math.min(255, (normalizedGray - 128) * 1.12 + 128)
+      Math.min(255, (normalizedGray - 128) * 1.6 + 128)
     );
     pixels[index] = contrasted;
     pixels[index + 1] = contrasted;
