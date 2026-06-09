@@ -103,7 +103,14 @@ test("local inference uses accuracy-oriented decoding and context", async () => 
 
   assert.match(source, /role:\s*"system"/);
   assert.match(source, /temperature:\s*0/);
-  assert.match(source, /max_tokens:\s*sourceQuality\.mode === "quick" \? 350 : 950/);
+  assert.match(source, /estimateQuestionCount\(ocrText\)/);
+  assert.match(source, /useCompactBatchPrompt = estimatedQuestionCount >= 2/);
+  assert.match(source, /const ANALYSIS_TIMEOUT_MS = 60000/);
+  assert.match(source, /const ANALYSIS_TOTAL_TIMEOUT_MS = 210000/);
+  assert.match(source, /const LONG_BATCH_CHUNK_SIZE = 2/);
+  assert.match(source, /estimatedQuestionCount >= 5/);
+  assert.match(source, /chunkQuestionScopes\(scopes, chunkSize\)/);
+  assert.match(source, /max_tokens:\s*maxTokens/);
   assert.match(source, /context_window_size:\s*4096/);
   assert.match(source, /question-only direct-answer prompts/);
 });
@@ -138,4 +145,54 @@ test("true re-crop uses the existing offscreen screenshot", async () => {
   assert.match(background, /QB_OFFSCREEN_RECROP_LAST_SCREENSHOT/);
   assert.match(offscreen, /screenshotDataUrl: lastScreenshotDataUrl/);
   assert.match(offscreen, /No screenshot is available/);
+});
+
+test("new learning controls stay local and task-scoped", async () => {
+  const content = await readFile(
+    new URL("../content/content.js", import.meta.url),
+    "utf8"
+  );
+  const background = await readFile(
+    new URL("../background.js", import.meta.url),
+    "utf8"
+  );
+  const offscreen = await readFile(
+    new URL("../offscreen.js", import.meta.url),
+    "utf8"
+  );
+
+  assert.match(content, /Custom Instructions/);
+  assert.match(content, /Ask Follow-up/);
+  assert.match(content, /QB_CANCEL_TASK/);
+  assert.match(content, /Cancel it and start a new crop/);
+  assert.match(content, /activeRequestId !== taskId/);
+  assert.match(content, /message\.taskId \|\| message\.requestId/);
+  assert.match(background, /QB_OFFSCREEN_CANCEL_TASK/);
+  assert.match(background, /taskId: requestId/);
+  assert.match(background, /customInstruction: message\.customInstruction/);
+  assert.match(background, /analyzeAnyway: message\.analyzeAnyway/);
+  assert.match(offscreen, /detectQuestionQuality/);
+  assert.match(offscreen, /buildFollowUpPrompt/);
+  assert.match(offscreen, /stream:\s*true/);
+  assert.match(offscreen, /max_tokens:\s*320/);
+  assert.match(
+    offscreen,
+    /const stream = await engine\.chat\.completions\.create\(\{[\s\S]*?stream:\s*true/
+  );
+  assert.match(
+    offscreen,
+    /consumeFollowUpStream\(stream,\s*engine,\s*id\)/
+  );
+  assert.match(offscreen, /followupText/);
+  assert.match(content, /qb-followup-pending/);
+  assert.match(content, /followupStreamingBubble/);
+  assert.match(content, /questions detected/);
+  assert.match(content, /questions analyzed/);
+  assert.match(offscreen, /batchIncomplete/);
+  assert.match(offscreen, /recoverQuestionsByScope/);
+  assert.match(offscreen, /Recovering question/);
+  assert.match(offscreen, /partialAIResult/);
+  assert.match(content, /result\.partialAIResult/);
+  assert.match(content, /createQuestionResult/);
+  assert.doesNotMatch(content, /qbFollowupHistory|followupChatHistory/);
 });

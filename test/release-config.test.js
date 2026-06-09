@@ -21,6 +21,15 @@ test("build reads the package version instead of hardcoding a release", async ()
   assert.doesNotMatch(source, /manifest\.version = "\d+\.\d+\.\d+"/);
 });
 
+test("build bundles the module-based background service worker", async () => {
+  const buildScript = await readFile(
+    new URL("../scripts/build.mjs", import.meta.url),
+    "utf8"
+  );
+  assert.match(buildScript, /entryPoints: \[path\.join\(root, "background\.js"\)\]/);
+  assert.match(buildScript, /format: "esm"/);
+});
+
 test("main release workflow checks, builds, tags, and publishes a zip", async () => {
   const workflow = await readFile(
     ".github/workflows/release.yml",
