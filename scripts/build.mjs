@@ -33,7 +33,6 @@ await mkdir(path.join(dist, "vendor", "webllm"), { recursive: true });
 
 await Promise.all([
   cp(path.join(root, "manifest.json"), path.join(dist, "manifest.json")),
-  cp(path.join(root, "background.js"), path.join(dist, "background.js")),
   cp(path.join(root, "offscreen.html"), path.join(dist, "offscreen.html")),
   ...["16", "32", "48", "128"].map((size) =>
     cp(
@@ -52,6 +51,17 @@ await Promise.all([
     path.join(dist, "vendor", "ocr", "worker.min.js")
   ),
 ]);
+
+await build({
+  entryPoints: [path.join(root, "background.js")],
+  bundle: true,
+  format: "esm",
+  platform: "browser",
+  target: "chrome116",
+  outfile: path.join(dist, "background.js"),
+  sourcemap: false,
+  minify: false
+});
 
 await build({
   entryPoints: [path.join(root, "content", "content.js")],

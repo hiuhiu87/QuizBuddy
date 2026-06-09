@@ -20,10 +20,16 @@ model setup, and result-rendering flows are implemented.
 - Crop-first visible-tab screenshot workflow
 - Browser-local Vietnamese and English OCR
 - Selectable OCR language and editable OCR text
+- Multi-question crop analysis with independent answers and per-question evidence
 - Quick Answer and Learning modes
 - Subject-aware prompts for English, German, Math, general knowledge, and law
 - Optional Check My Answer feedback
 - OCR, AI, and overall reliability indicators with visible reasons
+- OCR line numbering and answer source traces
+- Local question-quality warnings for missing choices, passages, and visuals
+- Cancellable task-scoped OCR, analysis, practice, and follow-up work
+- Locally stored global or subject-specific custom instructions
+- Session-only follow-up chat grounded in the current question
 - Per-option analysis and compact learning examples
 - Local similar-practice generation with answer reveal
 - Session-only concept notes
@@ -71,8 +77,8 @@ The repository root is source code. Always load `dist/` in Chrome.
 4. Review the local model notice and click the download button yourself.
 5. Wait for model setup to complete.
 6. Click **Crop Question**.
-7. Drag over the question. Include answer choices when they exist, but
-   question-only crops are also supported.
+7. Drag over one or more questions. Include each question's answer choices
+   when they exist; question-only crops are also supported.
 8. Correct the OCR text if needed and click **Analyze Again**.
 9. Review the suggested answer and explanation.
 
@@ -81,6 +87,21 @@ analysis, core knowledge, study notes, and practice generation. Select a
 subject preset when specialized guidance is useful. Enable **Check my answer**
 and enter a label or free-text answer before cropping or analyzing again to
 receive learning-oriented feedback.
+
+Question-quality checks run after OCR. Warnings do not block analysis, while
+serious issues offer **Analyze anyway**, **Edit OCR**, and **Crop again**.
+Analyzing despite a serious warning lowers the displayed reliability.
+
+After a successful analysis, use **Ask Follow-up** or its quick actions to ask
+about the current question. Follow-up messages are kept only in the current
+sidebar session. Custom instructions can be saved globally or for the current
+subject in Chrome local storage; they cannot override the JSON, evidence, or
+insufficient-information rules.
+
+Follow-up answers stream into the sidebar as they are generated. Requests that
+name a question number use only that question's OCR lines and compact analysis
+context, reducing prompt processing and first-token latency. Follow-up output
+is capped to a concise response and interrupted after 45 seconds.
 
 After a capture, **Re-crop screenshot** opens the same full screenshot in a
 temporary modal. It does not call `captureVisibleTab` again. The screenshot is
@@ -142,6 +163,7 @@ Offscreen Document
   - Selectable Vietnamese/English Tesseract.js OCR
   - Multi-model WebLLM setup, cache management, and inference
   - AI JSON validation, reliability scoring, and practice generation
+  - Question-quality checks, source traces, and grounded follow-up inference
   - Temporary full-screenshot memory and device diagnostics
 ```
 
@@ -154,6 +176,7 @@ QuizBuddy AI does not:
 - Operate a backend
 - Store question history
 - Persist screenshots, practice questions, or session study notes
+- Persist follow-up messages or analysis results
 - Require login
 - Include analytics or tracking
 
@@ -195,6 +218,12 @@ webpage content script. To reduce impact on the active page:
 Local processing can still temporarily use substantial CPU, RAM, and GPU while
 OCR or inference is actively running.
 
+Cancellation is cooperative. QuizBuddy calls WebLLM's generation interrupt
+when the installed runtime exposes it, terminates the active OCR worker when
+possible, and always suppresses stale results by task ID. Since the main model
+response is structured JSON, the UI streams named progress stages rather than
+showing incomplete raw JSON tokens.
+
 ## Answer Accuracy
 
 For the best available local accuracy:
@@ -207,10 +236,22 @@ For the best available local accuracy:
 - Correct OCR mistakes and use **Analyze Again** before trusting a low-confidence result.
 
 Inference uses deterministic decoding, a 4096-token context window, and an
-accuracy prompt that requires independent solving and comparison against every
-visible choice. If no choices are visible, it switches to direct-answer
-behavior and returns the answer content with no option label. The extension
-still cannot guarantee a correct answer.
+accuracy prompt that splits multi-question crops, solves every question
+independently, and associates repeated A/B/C/D labels only with their own
+question. Standalone markers such as `Câu 1.` are recognized even when OCR
+loses accents or reads them as `Cau`/`Côu`. Output capacity scales with the
+detected question count. Crops containing two or more questions use a compact
+batch schema to reduce latency and malformed output. If the local model returns
+fewer questions or an avoidable `Unknown`, QuizBuddy recovers bounded groups of
+up to four question scopes and merges the results. Crops with five or more
+questions skip the large initial request and start with two-question groups.
+A failed group is split into single questions, while completed groups are
+preserved, so one timeout does not discard the entire batch. Each generation
+and the full analysis have finite time budgets. OCR confidence affects the
+displayed reliability but does not by itself force an `Unknown` answer. If no
+choices are visible, the extension switches to direct-answer behavior and
+returns the answer content with no option label. The extension still cannot
+guarantee a correct answer.
 
 ## OCR
 
