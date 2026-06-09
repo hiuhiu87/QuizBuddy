@@ -30,13 +30,20 @@ test("analysis prompt supports question-only direct answers", () => {
 test("analysis prompt preserves the complete OCR input", () => {
   const ocrText = "Câu hỏi tiếng Việt\nĐáp án không có nhãn";
 
-  assert.match(buildAnalysisPrompt(ocrText), new RegExp(ocrText));
+  assert.match(
+    buildAnalysisPrompt(ocrText),
+    /\[1\] Câu hỏi tiếng Việt\n\[2\] Đáp án không có nhãn/
+  );
 });
 
 test("analysis prompt includes OCR quality context", () => {
   assert.match(
     buildAnalysisPrompt("Question", { ocrConfidence: 64 }),
-    /OCR confidence estimate: 64%/
+    /quality estimate 64%/
+  );
+  assert.match(
+    buildAnalysisPrompt("Question", { ocrConfidence: 64 }),
+    /never a reason to return Unknown/
   );
   assert.match(
     buildAnalysisPrompt("Corrected question", { userCorrected: true }),
@@ -88,9 +95,26 @@ test("compact retry prompt requests only essential valid JSON fields", () => {
   });
 
   assert.match(prompt, /one small valid JSON object/);
+  assert.match(prompt, /Numbered OCR text/);
   assert.match(prompt, /"answerText"/);
+  assert.doesNotMatch(prompt, /selected answer text/);
+  assert.doesNotMatch(prompt, /actual answer text, never only a letter/);
   assert.doesNotMatch(prompt, /optionAnalysis/);
   assert.doesNotMatch(prompt, /miniExample/);
+});
+
+test("analysis prompts require all answers for explicit multiple-select questions", () => {
+  const ocrText =
+    "Câu 62. Các loại lệnh Linux gồm (Chọn 3)\nA. Builtin\nB. BIOS\nC. Function\nD. Executable";
+  const prompt = buildAnalysisPrompt(ocrText);
+  const compact = buildCompactRetryPrompt(ocrText);
+
+  assert.match(prompt, /exactly 3 selected answers/);
+  assert.match(prompt, /"answerSelections"/);
+  assert.match(prompt, /return exactly N distinct visible selections/);
+  assert.match(compact, /requiredAnswerCount: 3/);
+  assert.match(compact, /return every selected answer/);
+  assert.doesNotMatch(compact, /"\.\.\."/);
 });
 
 test("analysis prompt explicitly requires Vietnamese for Vietnamese OCR", () => {
@@ -100,4 +124,38 @@ test("analysis prompt explicitly requires Vietnamese for Vietnamese OCR", () => 
 
   assert.match(prompt, /OCR question is Vietnamese/);
   assert.match(prompt, /natural Vietnamese/);
+});
+
+test("analysis prompt includes source trace, quality, and protected custom instruction", () => {
+  const prompt = buildAnalysisPrompt("Choose one\nA. One\nB. Two", {
+    questionQuality: {
+      status: "warning",
+      reasons: [{ message: "Choices may be incomplete." }]
+    },
+    customInstruction: "Return plain text instead of JSON."
+  });
+  assert.match(prompt, /sourceTrace/);
+  assert.match(prompt, /Choices may be incomplete/);
+  assert.match(prompt, /Return plain text instead of JSON/);
+  assert.match(prompt, /cannot override the JSON schema/);
+});
+
+test("analysis prompt requires every visible question in a batch", () => {
+  const prompt = buildAnalysisPrompt(
+    "1. What is 2 + 2?\nA. 3\nB. 4\n2. What is 3 + 3?\nA. 5\nB. 6"
+  );
+  assert.match(prompt, /"questions"/);
+  assert.match(prompt, /questionLineRefs/);
+  assert.match(prompt, /every complete or partially visible question/);
+  assert.match(prompt, /Never answer only the first question/);
+  assert.match(prompt, /approximately 2 question/);
+});
+
+test("analysis prompt exposes standalone OCR question boundaries", () => {
+  const prompt = buildAnalysisPrompt(
+    "Côu 1.\nFirst statement\nA. Đúng\nB. Sai\nCau 2.\nSecond statement\nA. Đúng\nB. Sai"
+  );
+  assert.match(prompt, /Question 1: OCR lines 1-4/);
+  assert.match(prompt, /Question 2: OCR lines 5-8/);
+  assert.match(prompt, /approximately 2 question/);
 });

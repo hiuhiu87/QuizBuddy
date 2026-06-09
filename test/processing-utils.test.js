@@ -87,6 +87,20 @@ test("normalizeOCRText recognizes the reported Vietnamese OCR sample", () => {
   ]);
 });
 
+test("normalizeOCRText separates inline answer choices through H", () => {
+  const ocrText =
+    "Cau 62.\nCac loại lệnh trong Linux gồm:(Chọn 3)\nA. Shell builtin\nB. BIOS command\nC. Shel function\nD. Executable E. Alias F. Hardware command";
+
+  assert.deepEqual(extractVisibleOptions(normalizeOCRText(ocrText)), [
+    { label: "A", text: "Shell builtin" },
+    { label: "B", text: "BIOS command" },
+    { label: "C", text: "Shel function" },
+    { label: "D", text: "Executable" },
+    { label: "E", text: "Alias" },
+    { label: "F", text: "Hardware command" }
+  ]);
+});
+
 test("parseAIResult accepts JSON wrapped in model chatter", () => {
   const result = parseAIResult(
     'Result: {"answerText":"Two","answerLabel":"B","confidence":"HIGH","shortExplanation":"Because.","coreKnowledge":"Rule","notes":"Check units."}',
@@ -139,6 +153,105 @@ test("parseAIResult expands a label-only answer using OCR choice text", () => {
   assert.equal(result.answerText, "Four");
   assert.equal(result.answerLabel, "B");
   assert.equal(result.answerWasExpandedFromOption, true);
+});
+
+test("parseAIResult preserves every explicit multiple-select answer", () => {
+  const ocrText =
+    "Cau 62.\nCac loại lệnh trong Linux gồm:(Chọn 3)\nA. Shell builtin\nB. BIOS command\nC. Shel function\nD. Executable E. Alias F. Hardware command";
+  const result = parseAIResult(
+    JSON.stringify({
+      answerSelections: [
+        { label: "A", text: "Shell builtin" },
+        { label: "C", text: "Shell function" },
+        { label: "D", text: "Executable" }
+      ],
+      answerText: "Shell builtin; Shell function; Executable",
+      answerLabel: "A, C, D",
+      confidence: "high"
+    }),
+    ocrText
+  );
+
+  assert.deepEqual(result.answerSelections, [
+    { label: "A", text: "Shell builtin" },
+    { label: "C", text: "Shel function" },
+    { label: "D", text: "Executable" }
+  ]);
+  assert.equal(result.answerLabel, "A, C, D");
+  assert.equal(result.requiredAnswerCount, 3);
+  assert.equal(result.isMultiSelect, true);
+  assert.equal(result.answerCountMismatch, false);
+});
+
+test("parseAIResult recovers multiple answers from correct option analysis", () => {
+  const ocrText =
+    "Chọn 3 đáp án\nA. First\nB. Second\nC. Third\nD. Fourth";
+  const result = parseAIResult(
+    JSON.stringify({
+      answerText: "First",
+      answerLabel: "A",
+      confidence: "high",
+      optionAnalysis: [
+        { label: "A", text: "First", isCorrect: true },
+        { label: "B", text: "Second", isCorrect: false },
+        { label: "C", text: "Third", isCorrect: true },
+        { label: "D", text: "Fourth", isCorrect: true }
+      ]
+    }),
+    ocrText
+  );
+
+  assert.deepEqual(
+    result.answerSelections.map((selection) => selection.label),
+    ["A", "C", "D"]
+  );
+  assert.equal(result.answerCountMismatch, false);
+});
+
+test("parseAIResult recovers a multiple-select label list from answerText", () => {
+  const result = parseAIResult(
+    '{"answerText":"A, C, D","confidence":"high"}',
+    "Chọn 3\nA. First\nB. Second\nC. Third\nD. Fourth"
+  );
+
+  assert.deepEqual(result.answerSelections, [
+    { label: "A", text: "First" },
+    { label: "C", text: "Third" },
+    { label: "D", text: "Fourth" }
+  ]);
+  assert.equal(result.answerCountMismatch, false);
+});
+
+test("parseAIResult flags an incomplete multiple-select result", () => {
+  const result = parseAIResult(
+    '{"answerText":"First","answerLabel":"A","confidence":"high"}',
+    "Choose 3\nA. First\nB. Second\nC. Third\nD. Fourth"
+  );
+
+  assert.equal(result.requiredAnswerCount, 3);
+  assert.equal(result.answerSelections.length, 1);
+  assert.equal(result.answerCountMismatch, true);
+});
+
+test("parseAIResult rejects copied JSON schema placeholders", () => {
+  const result = parseAIResult(
+    JSON.stringify({
+      answerSelections: [
+        {
+          label: "visible selected label or empty",
+          text: "selected answer text"
+        }
+      ],
+      answerText: "actual answer text, never only a letter",
+      answerLabel: "visible option label or empty string",
+      confidence: "high"
+    }),
+    "Cau 69.\nCac thao tac thay doi pham vi bien: (Chon 3)\nA. delete VAR\nB. export VAR\nC. export VAR=value\nD. export -n VAR\nE. unset VAR\nF. rm VAR"
+  );
+
+  assert.equal(result.answerText, "Unknown");
+  assert.deepEqual(result.answerSelections, []);
+  assert.equal(result.answerCountMismatch, true);
 });
 
 test("parseAIResult returns a safe fallback for malformed output", () => {
@@ -293,4 +406,104 @@ test("parseAIResult safely rejects a user label missing from OCR options", () =>
 
   assert.equal(result.userAnswerEvaluation.isCorrect, false);
   assert.match(result.userAnswerEvaluation.feedback, /not visible/);
+});
+
+test("parseAIResult accepts missing source trace and filters invalid references", () => {
+  const legacy = parseAIResult(
+    '{"answerText":"Two","confidence":"high"}',
+    "Question\nA. One\nB. Two"
+  );
+  assert.deepEqual(legacy.sourceTrace, []);
+
+  const traced = parseAIResult(
+    JSON.stringify({
+      answerText: "Two",
+      confidence: "high",
+      sourceTrace: [
+        {
+          claim: "B is the answer.",
+          lineRefs: [3, 8],
+          reason: "Line 3 contains B."
+        }
+      ]
+    }),
+    "Question\nA. One\nB. Two"
+  );
+  assert.deepEqual(traced.sourceTrace[0].lineRefs, [3]);
+});
+
+test("parseAIResult returns every batch question and preserves legacy top-level fields", () => {
+  const ocrText =
+    "1. Which number is even?\nA. Three\nB. Four\n2. Which number is odd?\nA. Six\nB. Seven";
+  const result = parseAIResult(
+    JSON.stringify({
+      mode: "learning",
+      questions: [
+        {
+          questionNumber: 1,
+          questionText: "Which number is even?",
+          questionLineRefs: [1, 2, 3],
+          answerText: "B",
+          answerLabel: "B",
+          confidence: "high",
+          shortExplanation: "Four is even."
+        },
+        {
+          questionNumber: 2,
+          questionText: "Which number is odd?",
+          questionLineRefs: [4, 5, 6],
+          answerText: "B",
+          answerLabel: "B",
+          confidence: "high",
+          shortExplanation: "Seven is odd."
+        }
+      ]
+    }),
+    ocrText
+  );
+
+  assert.equal(result.questionCount, 2);
+  assert.equal(result.isBatch, true);
+  assert.equal(result.questions[0].answerText, "Four");
+  assert.equal(result.questions[1].answerText, "Seven");
+  assert.equal(result.answerText, "Four");
+  assert.deepEqual(result.questions[1].questionLineRefs, [4, 5, 6]);
+});
+
+test("parseAIResult keeps old single-question output backward compatible", () => {
+  const result = parseAIResult(
+    '{"answerText":"Paris","confidence":"high"}',
+    "What is the capital of France?"
+  );
+  assert.equal(result.questionCount, 1);
+  assert.equal(result.isBatch, false);
+  assert.equal(result.questions[0].answerText, "Paris");
+  assert.equal(result.answerText, "Paris");
+});
+
+test("parseAIResult infers batch scopes when the model omits line references", () => {
+  const result = parseAIResult(
+    JSON.stringify({
+      questions: [
+        {
+          questionNumber: 1,
+          answerText: "B",
+          answerLabel: "B",
+          confidence: "high"
+        },
+        {
+          questionNumber: 2,
+          answerText: "B",
+          answerLabel: "B",
+          confidence: "high"
+        }
+      ]
+    }),
+    "1. What is 2 + 2?\nA. Three\nB. Four\n2. What is 3 + 4?\nA. Six\nB. Seven"
+  );
+
+  assert.equal(result.questions[0].answerText, "Four");
+  assert.equal(result.questions[1].answerText, "Seven");
+  assert.deepEqual(result.questions[0].questionLineRefs, [1, 2, 3]);
+  assert.deepEqual(result.questions[1].questionLineRefs, [4, 5, 6]);
 });
