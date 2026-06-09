@@ -54,6 +54,7 @@ import { numberOcrLines } from "../lib/source-trace.js";
   let selectedOcrLanguage = DEFAULT_OCR_LANGUAGE;
   let selectedAnalysisMode = DEFAULT_ANALYSIS_MODE;
   let selectedSubject = DEFAULT_SUBJECT_PRESET;
+  let selectedTheme = "system";
   let sessionStudyNotes = [];
   let lastAnalysisContext = null;
   let lastScreenshotAvailable = false;
@@ -72,8 +73,11 @@ import { numberOcrLines } from "../lib/source-trace.js";
   const FLOATING_BUTTON_DOCKED_KEY = "qbFloatingButtonDocked";
   const ANALYSIS_MODE_KEY = "qbAnalysisMode";
   const SUBJECT_PRESET_KEY = "qbSubjectPreset";
+  const THEME_KEY = "qbTheme";
+  const systemThemeMedia = window.matchMedia("(prefers-color-scheme: dark)");
   const host = document.createElement("div");
   setProtectedHostStyles(host);
+  host.dataset.qbTheme = systemThemeMedia.matches ? "dark" : "light";
 
   const shadowRoot = host.attachShadow({ mode: "closed" });
   const style = document.createElement("style");
@@ -101,7 +105,10 @@ import { numberOcrLines } from "../lib/source-trace.js";
         <div class="qb-title">QuizBuddy AI</div>
         <div class="qb-subtitle">Local question analysis</div>
       </div>
-      <button class="qb-close-button" type="button" aria-label="Close sidebar">&times;</button>
+      <div class="qb-header-actions">
+        <button class="qb-theme-button" type="button" aria-label="Switch theme"></button>
+        <button class="qb-close-button" type="button" aria-label="Close sidebar">&times;</button>
+      </div>
     </div>
     <div class="qb-sidebar-body">
       <section class="qb-model-card">
@@ -290,6 +297,7 @@ import { numberOcrLines } from "../lib/source-trace.js";
   document.documentElement.append(host);
 
   const closeButton = sidebar.querySelector(".qb-close-button");
+  const themeButton = sidebar.querySelector(".qb-theme-button");
   const modelCard = sidebar.querySelector(".qb-model-card");
   const modelCardTitle = sidebar.querySelector(".qb-model-card-title");
   const modelCardText = sidebar.querySelector(".qb-model-card-text");
@@ -352,6 +360,7 @@ import { numberOcrLines } from "../lib/source-trace.js";
   const followupSend = sidebar.querySelector(".qb-followup-send");
   const followupChips = [...sidebar.querySelectorAll(".qb-followup-chip")];
 
+  applyTheme();
   cropButton.disabled = true;
   analyzeButton.disabled = true;
   modelStorageOrigin.textContent = `chrome-extension://${chrome.runtime.id}`;
@@ -380,6 +389,7 @@ import { numberOcrLines } from "../lib/source-trace.js";
     sidebar.classList.remove("qb-sidebar-open");
     releaseLocalResources();
   });
+  themeButton.addEventListener("click", toggleTheme);
 
   cropButton.addEventListener("click", startCropMode);
   analyzeButton.addEventListener("click", () => analyzeEditedOCRText(false));
@@ -440,6 +450,11 @@ import { numberOcrLines } from "../lib/source-trace.js";
   floatingButton.addEventListener("pointerup", onFloatingPointerUp);
   floatingButton.addEventListener("pointercancel", resetFloatingPointer);
   window.addEventListener("pagehide", releaseLocalResources);
+  systemThemeMedia.addEventListener("change", () => {
+    if (selectedTheme === "system") {
+      applyTheme();
+    }
+  });
   loadPreferences().catch(() => {});
 
   chrome.runtime.onMessage.addListener(message => {
@@ -1297,6 +1312,7 @@ import { numberOcrLines } from "../lib/source-trace.js";
           FLOATING_BUTTON_DOCKED_KEY,
           ANALYSIS_MODE_KEY,
           SUBJECT_PRESET_KEY,
+          THEME_KEY,
           CUSTOM_INSTRUCTIONS_KEY
         ])
         .then((storage) => {
@@ -1312,6 +1328,7 @@ import { numberOcrLines } from "../lib/source-trace.js";
           selectedSubject = normalizeSubjectPreset(
             storage[SUBJECT_PRESET_KEY]
           );
+          selectedTheme = normalizeTheme(storage[THEME_KEY]);
           floatingButtonDocked =
             storage[FLOATING_BUTTON_DOCKED_KEY] === true;
           customInstructions = normalizeCustomInstructions(
@@ -1321,6 +1338,7 @@ import { numberOcrLines } from "../lib/source-trace.js";
           ocrLanguageSelect.value = selectedOcrLanguage;
           subjectSelect.value = selectedSubject;
           applyAnalysisMode();
+          applyTheme();
           applyFloatingButtonDockState();
           customEnabled.checked = customInstructions.enabled;
           loadCustomInstructionEditor();
@@ -1408,6 +1426,41 @@ import { numberOcrLines } from "../lib/source-trace.js";
       button.classList.toggle("qb-mode-button-active", selected);
       button.setAttribute("aria-pressed", String(selected));
     });
+  }
+
+  async function toggleTheme() {
+    selectedTheme = getEffectiveTheme() === "dark" ? "light" : "dark";
+    applyTheme();
+    await chrome.storage.local.set({
+      [THEME_KEY]: selectedTheme
+    });
+  }
+
+  function applyTheme() {
+    const theme = getEffectiveTheme();
+    host.dataset.qbTheme = theme;
+    if (!themeButton) {
+      return;
+    }
+    const nextTheme = theme === "dark" ? "light" : "dark";
+    themeButton.textContent = nextTheme === "dark" ? "Dark" : "Light";
+    themeButton.title = `Switch to ${nextTheme} mode`;
+    themeButton.setAttribute(
+      "aria-label",
+      `Switch to ${nextTheme} mode`
+    );
+    themeButton.setAttribute("aria-pressed", String(theme === "dark"));
+  }
+
+  function getEffectiveTheme() {
+    if (selectedTheme === "dark" || selectedTheme === "light") {
+      return selectedTheme;
+    }
+    return systemThemeMedia.matches ? "dark" : "light";
+  }
+
+  function normalizeTheme(value) {
+    return value === "dark" || value === "light" ? value : "system";
   }
 
   async function setFloatingButtonDocked(docked) {
