@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildAnalysisPrompt } from "../lib/analysis-prompt.js";
 import { parseAIResult } from "../lib/processing-utils.js";
+import { numberOcrLines } from "../lib/source-trace.js";
 
 const benchmarkRoot = path.dirname(fileURLToPath(import.meta.url));
 const fixturePath = path.join(
@@ -28,7 +29,8 @@ for (const fixture of fixtures) {
     mode: "learning",
     subject: fixture.subject
   });
-  if (!prompt.includes(fixture.ocrText) || !prompt.includes("valid JSON")) {
+  const numberedText = numberOcrLines(fixture.ocrText).numberedText;
+  if (!prompt.includes(numberedText) || !prompt.includes("valid JSON")) {
     failedCases.push({
       id: fixture.id,
       reason: "Prompt regression"

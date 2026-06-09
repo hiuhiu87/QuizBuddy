@@ -56,3 +56,39 @@ test("edited OCR adds an explicit reason", () => {
 
   assert.ok(result.reasons.some((reason) => /manually edited/.test(reason)));
 });
+
+test("question quality warning and analyze-anyway downgrade reliability", () => {
+  const warning = calculateOverallReliability({
+    ocrConfidence: 95,
+    aiConfidence: "high",
+    parseStatus: "parsed",
+    answerWasExpandedFromOption: false,
+    wasOcrEdited: false,
+    questionQuality: { status: "warning" }
+  });
+  assert.equal(warning.level, "medium");
+
+  const bad = calculateOverallReliability({
+    ocrConfidence: 95,
+    aiConfidence: "high",
+    parseStatus: "parsed",
+    answerWasExpandedFromOption: false,
+    wasOcrEdited: false,
+    questionQuality: { status: "bad" },
+    analyzeAnyway: true
+  });
+  assert.equal(bad.level, "low");
+});
+
+test("wrong multiple-select answer count forces low reliability", () => {
+  const result = calculateOverallReliability({
+    ocrConfidence: 95,
+    aiConfidence: "high",
+    parseStatus: "parsed",
+    answerCountMismatch: true,
+    requiredAnswerCount: 3
+  });
+
+  assert.equal(result.level, "low");
+  assert.ok(result.reasons.some((reason) => /requires 3 answers/.test(reason)));
+});
