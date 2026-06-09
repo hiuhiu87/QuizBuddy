@@ -20,6 +20,14 @@ import {
   clearSessionStudyNotes
 } from "../lib/study-notes.js";
 import { evaluatePracticeAnswer } from "../lib/practice-utils.js";
+import {
+  CUSTOM_INSTRUCTIONS_KEY,
+  CUSTOM_INSTRUCTION_TEMPLATES,
+  normalizeCustomInstructions,
+  resolveCustomInstruction,
+  updateCustomInstruction
+} from "../lib/custom-instructions.js";
+import { numberOcrLines } from "../lib/source-trace.js";
 
 (() => {
   const injectionFlag = Symbol.for("qb.content.injected");
@@ -55,6 +63,9 @@ import { evaluatePracticeAnswer } from "../lib/practice-utils.js";
   let suppressFloatingClick = false;
   let preferencesLoadedPromise = null;
   let resourceReleaseTimer = null;
+  let customInstructions = normalizeCustomInstructions(null);
+  let pendingQuestionQuality = null;
+  let followupStreamingBubble = null;
 
   const MODEL_SELECTION_KEY = "qbSelectedModelId";
   const OCR_LANGUAGE_KEY = "qbOcrLanguage";
@@ -128,40 +139,104 @@ import { evaluatePracticeAnswer } from "../lib/practice-utils.js";
         </div>
       </section>
       <section class="qb-settings-row">
-        <label class="qb-field-label" for="qb-ocr-language">OCR Language</label>
-        <select id="qb-ocr-language" class="qb-select qb-ocr-language">
-          ${OCR_LANGUAGE_OPTIONS.map(
-            (option) =>
-              `<option value="${option.id}">${option.label}</option>`
-          ).join("")}
-        </select>
-        <label class="qb-field-label" for="qb-subject-preset">Subject</label>
-        <select id="qb-subject-preset" class="qb-select qb-subject-preset">
-          ${SUBJECT_PRESETS.map(
-            (option) =>
-              `<option value="${option.id}">${option.label}</option>`
-          ).join("")}
-        </select>
-        <div class="qb-field-label">Mode</div>
-        <div class="qb-mode-selector" role="group" aria-label="Analysis mode">
-          ${ANALYSIS_MODES.map(
-            (option) =>
-              `<button type="button" class="qb-mode-button" data-mode="${option.id}">${option.label}</button>`
-          ).join("")}
+        <div class="qb-card-heading">
+          <div>
+            <div class="qb-card-title">Question setup</div>
+            <div class="qb-card-description">Choose how the question is read and explained.</div>
+          </div>
         </div>
-        <label class="qb-check-answer-toggle">
-          <input class="qb-check-answer-checkbox" type="checkbox" />
-          <span>Check my answer instead of just solving</span>
-        </label>
-        <input
-          class="qb-user-answer-input qb-hidden"
-          type="text"
-          placeholder="I think the answer is... (A, B, or free text)"
-          aria-label="Your answer"
-        />
+        <div class="qb-settings-grid">
+          <div class="qb-field-group">
+            <label class="qb-field-label" for="qb-ocr-language">OCR Language</label>
+            <select id="qb-ocr-language" class="qb-select qb-ocr-language">
+              ${OCR_LANGUAGE_OPTIONS.map(
+                (option) =>
+                  `<option value="${option.id}">${option.label}</option>`
+              ).join("")}
+            </select>
+          </div>
+          <div class="qb-field-group">
+            <label class="qb-field-label" for="qb-subject-preset">Subject</label>
+            <select id="qb-subject-preset" class="qb-select qb-subject-preset">
+              ${SUBJECT_PRESETS.map(
+                (option) =>
+                  `<option value="${option.id}">${option.label}</option>`
+              ).join("")}
+            </select>
+          </div>
+          <div class="qb-field-group qb-field-group-wide">
+            <div class="qb-field-label">Mode</div>
+            <div class="qb-mode-selector" role="group" aria-label="Analysis mode">
+              ${ANALYSIS_MODES.map(
+                (option) =>
+                  `<button type="button" class="qb-mode-button" data-mode="${option.id}">${option.label}</button>`
+              ).join("")}
+            </div>
+          </div>
+        </div>
+        <div class="qb-answer-check">
+          <label class="qb-check-answer-toggle">
+            <input class="qb-check-answer-checkbox" type="checkbox" />
+            <span>Check my answer instead of just solving</span>
+          </label>
+          <input
+            class="qb-user-answer-input qb-hidden"
+            type="text"
+            placeholder="I think the answer is... (A, B, or free text)"
+            aria-label="Your answer"
+          />
+        </div>
+        <details class="qb-custom-instructions">
+          <summary>
+            <span>Custom Instructions</span>
+            <span class="qb-details-hint">Optional</span>
+          </summary>
+          <div class="qb-custom-content">
+            <label class="qb-check-answer-toggle">
+              <input class="qb-custom-enabled" type="checkbox" />
+              <span>Enable custom instruction</span>
+            </label>
+            <div class="qb-field-group">
+              <label class="qb-field-label">Scope</label>
+              <select class="qb-select qb-custom-scope" aria-label="Custom instruction scope">
+                <option value="global">Global</option>
+                <option value="subject">Current subject only</option>
+              </select>
+            </div>
+            <div class="qb-field-group">
+              <label class="qb-field-label">Template</label>
+              <select class="qb-select qb-custom-template" aria-label="Custom instruction template">
+                <option value="">Choose a template...</option>
+                ${CUSTOM_INSTRUCTION_TEMPLATES.map(
+                  (template) =>
+                    `<option value="${template.id}">${template.label}</option>`
+                ).join("")}
+              </select>
+            </div>
+            <textarea class="qb-custom-text" rows="4" maxlength="2000" placeholder="Add local instructions for the selected scope"></textarea>
+            <div class="qb-custom-actions">
+              <button class="qb-custom-save" type="button">Save</button>
+              <button class="qb-custom-reset" type="button">Reset</button>
+              <button class="qb-custom-default" type="button">Restore default</button>
+            </div>
+            <div class="qb-local-note">Stored only in this browser.</div>
+          </div>
+        </details>
       </section>
-      <button class="qb-crop-button" type="button">Crop Question</button>
-      <div class="qb-status" role="status">Ready to crop a question.</div>
+      <section class="qb-primary-actions">
+        <button class="qb-crop-button" type="button">Crop Question</button>
+        <div class="qb-status" role="status" aria-live="polite">Ready to crop a question.</div>
+        <button class="qb-cancel-button qb-hidden" type="button">Cancel current task</button>
+      </section>
+      <section class="qb-quality-card qb-hidden" role="alert">
+        <div class="qb-quality-title">This question may be incomplete.</div>
+        <div class="qb-quality-reasons"></div>
+        <div class="qb-quality-actions">
+          <button class="qb-quality-analyze" type="button">Analyze anyway</button>
+          <button class="qb-quality-edit" type="button">Edit OCR</button>
+          <button class="qb-quality-recrop" type="button">Crop again</button>
+        </div>
+      </section>
       <section class="qb-section qb-preview-section qb-hidden">
         <h2 class="qb-section-title">Cropped Image</h2>
         <img class="qb-preview-image" alt="Cropped question" />
@@ -178,6 +253,23 @@ import { evaluatePracticeAnswer } from "../lib/practice-utils.js";
       <section class="qb-section qb-result-section qb-hidden">
         <h2 class="qb-section-title">AI Result</h2>
         <div class="qb-result-card"></div>
+      </section>
+      <section class="qb-section qb-followup-section qb-hidden">
+        <h2 class="qb-section-title">Ask Follow-up</h2>
+        <div class="qb-followup-chips">
+          ${[
+            "Explain simpler",
+            "Why not other choices?",
+            "Give similar example",
+            "Explain in Vietnamese",
+            "Make a mnemonic"
+          ].map((label) => `<button type="button" class="qb-followup-chip">${label}</button>`).join("")}
+        </div>
+        <div class="qb-followup-messages"></div>
+        <div class="qb-followup-compose">
+          <input class="qb-followup-input" type="text" placeholder="Ask a follow-up..." aria-label="Ask a follow-up" />
+          <button class="qb-followup-send" type="button">Send</button>
+        </div>
       </section>
       <section class="qb-section qb-practice-section qb-hidden">
         <h2 class="qb-section-title">Similar Practice</h2>
@@ -241,6 +333,24 @@ import { evaluatePracticeAnswer } from "../lib/practice-utils.js";
   const notesSection = sidebar.querySelector(".qb-notes-section");
   const notesList = sidebar.querySelector(".qb-notes-list");
   const clearNotesButton = sidebar.querySelector(".qb-clear-notes-button");
+  const cancelButton = sidebar.querySelector(".qb-cancel-button");
+  const qualityCard = sidebar.querySelector(".qb-quality-card");
+  const qualityReasons = sidebar.querySelector(".qb-quality-reasons");
+  const qualityAnalyzeButton = sidebar.querySelector(".qb-quality-analyze");
+  const qualityEditButton = sidebar.querySelector(".qb-quality-edit");
+  const qualityRecropButton = sidebar.querySelector(".qb-quality-recrop");
+  const customEnabled = sidebar.querySelector(".qb-custom-enabled");
+  const customScope = sidebar.querySelector(".qb-custom-scope");
+  const customTemplate = sidebar.querySelector(".qb-custom-template");
+  const customText = sidebar.querySelector(".qb-custom-text");
+  const customSave = sidebar.querySelector(".qb-custom-save");
+  const customReset = sidebar.querySelector(".qb-custom-reset");
+  const customDefault = sidebar.querySelector(".qb-custom-default");
+  const followupSection = sidebar.querySelector(".qb-followup-section");
+  const followupMessages = sidebar.querySelector(".qb-followup-messages");
+  const followupInput = sidebar.querySelector(".qb-followup-input");
+  const followupSend = sidebar.querySelector(".qb-followup-send");
+  const followupChips = [...sidebar.querySelectorAll(".qb-followup-chip")];
 
   cropButton.disabled = true;
   analyzeButton.disabled = true;
@@ -272,7 +382,7 @@ import { evaluatePracticeAnswer } from "../lib/practice-utils.js";
   });
 
   cropButton.addEventListener("click", startCropMode);
-  analyzeButton.addEventListener("click", analyzeEditedOCRText);
+  analyzeButton.addEventListener("click", () => analyzeEditedOCRText(false));
   modelDownloadButton.addEventListener("click", () => {
     prepareLocalModel();
   });
@@ -298,6 +408,33 @@ import { evaluatePracticeAnswer } from "../lib/practice-utils.js";
     sessionStudyNotes = clearSessionStudyNotes();
     renderSessionStudyNotes();
   });
+  cancelButton.addEventListener("click", cancelActiveTask);
+  qualityAnalyzeButton.addEventListener("click", () => analyzeEditedOCRText(true));
+  qualityEditButton.addEventListener("click", () => {
+    ocrTextarea.focus();
+    qualityCard.classList.add("qb-hidden");
+  });
+  qualityRecropButton.addEventListener("click", () => {
+    qualityCard.classList.add("qb-hidden");
+    openRecropModal();
+  });
+  customSave.addEventListener("click", saveCustomInstruction);
+  customReset.addEventListener("click", loadCustomInstructionEditor);
+  customDefault.addEventListener("click", restoreDefaultCustomInstruction);
+  customScope.addEventListener("change", loadCustomInstructionEditor);
+  customTemplate.addEventListener("change", () => {
+    const template = CUSTOM_INSTRUCTION_TEMPLATES.find(
+      (item) => item.id === customTemplate.value
+    );
+    if (template) customText.value = template.text;
+  });
+  followupSend.addEventListener("click", () => sendFollowUp());
+  followupInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") sendFollowUp();
+  });
+  followupChips.forEach((chip) =>
+    chip.addEventListener("click", () => sendFollowUp(chip.textContent))
+  );
   floatingButton.addEventListener("pointerdown", onFloatingPointerDown);
   floatingButton.addEventListener("pointermove", onFloatingPointerMove);
   floatingButton.addEventListener("pointerup", onFloatingPointerUp);
@@ -326,10 +463,10 @@ import { evaluatePracticeAnswer } from "../lib/practice-utils.js";
 
     if (
       message.type === "QB_PROCESS_PROGRESS" &&
-      (message.requestId === activeRequestId ||
-        message.requestId === modelRequestId)
+      ((message.taskId || message.requestId) === activeRequestId ||
+        (message.taskId || message.requestId) === modelRequestId)
     ) {
-      if (message.requestId === modelRequestId) {
+      if ((message.taskId || message.requestId) === modelRequestId) {
         updateModelProgress(message);
       } else {
         setStatus(
@@ -341,7 +478,7 @@ import { evaluatePracticeAnswer } from "../lib/practice-utils.js";
 
     if (
       message.type === "QB_PROCESS_PARTIAL" &&
-      message.requestId === activeRequestId
+      (message.taskId || message.requestId) === activeRequestId
     ) {
       renderPartialResult(message);
     }
@@ -354,13 +491,23 @@ import { evaluatePracticeAnswer } from "../lib/practice-utils.js";
     }
   }
 
-  function startCropMode() {
+  async function startCropMode() {
     if (!modelReady) {
       showError(
         "Download and prepare the local AI model before cropping a question."
       );
       setStatus("Local AI model is not ready.");
       return;
+    }
+
+    if (activeRequestId) {
+      const replaceTask = window.confirm(
+        "A local task is still running. Cancel it and start a new crop?"
+      );
+      if (!replaceTask) {
+        return;
+      }
+      await cancelActiveTask();
     }
 
     if (cropOverlay) {
@@ -439,16 +586,19 @@ import { evaluatePracticeAnswer } from "../lib/practice-utils.js";
     setCaptureVisibility(true);
     await waitForBrowserPaint();
     activeRequestId = crypto.randomUUID();
+    const taskId = activeRequestId;
 
     try {
       const response = await chrome.runtime.sendMessage({
         type: "QB_CAPTURE_PROCESS_LOCAL",
-        requestId: activeRequestId,
+        requestId: taskId,
+        taskId,
         modelId: selectedModelId,
         ocrLanguage: selectedOcrLanguage,
         mode: selectedAnalysisMode,
         subject: selectedSubject,
         userSelectedAnswer: getUserSelectedAnswer(),
+        customInstruction: getActiveCustomInstruction(),
         rect: {
           ...rect,
           devicePixelRatio: window.devicePixelRatio || 1,
@@ -457,6 +607,7 @@ import { evaluatePracticeAnswer } from "../lib/practice-utils.js";
         },
       });
 
+      if (activeRequestId !== taskId) return;
       setCaptureVisibility(false);
       handleProcessingResponse(response);
     } catch (error) {
@@ -466,9 +617,11 @@ import { evaluatePracticeAnswer } from "../lib/practice-utils.js";
       );
       setStatus("Processing failed.");
     } finally {
-      activeRequestId = null;
-      setProcessingState(false);
-      scheduleResourceRelease();
+      if (activeRequestId === taskId) {
+        activeRequestId = null;
+        setProcessingState(false);
+        scheduleResourceRelease();
+      }
     }
   }
 
@@ -506,6 +659,16 @@ import { evaluatePracticeAnswer } from "../lib/practice-utils.js";
     }
 
     if (!response.ok) {
+      if (response.cancelled) {
+        setStatus("Task cancelled.");
+        return;
+      }
+      if (response.requiresQualityDecision) {
+        pendingQuestionQuality = response.questionQuality;
+        renderQuestionQuality(response.questionQuality, true);
+        setStatus("Review the question quality before continuing.");
+        return;
+      }
       showError(response.error || "Local processing failed.");
       setStatus(
         response.stage === "ocr"
@@ -520,12 +683,25 @@ import { evaluatePracticeAnswer } from "../lib/practice-utils.js";
     renderAIResult(response.aiResult);
     lastAnalysisContext = {
       ocrText: response.ocrText || ocrTextarea.value,
-      aiResult: response.aiResult
+      analysisResult: response.aiResult,
+      aiResult: response.aiResult,
+      numberedLines: numberOcrLines(response.ocrText || ocrTextarea.value),
+      questionQuality: response.questionQuality,
+      subject: selectedSubject,
+      mode: selectedAnalysisMode
     };
-    sessionStudyNotes = addSessionStudyNote(
-      sessionStudyNotes,
-      response.aiResult.coreKnowledge
-    );
+    renderQuestionQuality(response.questionQuality, false);
+    followupSection.classList.remove("qb-hidden");
+    const analyzedQuestions =
+      response.aiResult.questions?.length
+        ? response.aiResult.questions
+        : [response.aiResult];
+    analyzedQuestions.forEach((question) => {
+      sessionStudyNotes = addSessionStudyNote(
+        sessionStudyNotes,
+        question.coreKnowledge
+      );
+    });
     renderSessionStudyNotes();
     lastScreenshotAvailable =
       lastScreenshotAvailable || Boolean(response.croppedImageDataUrl);
@@ -551,37 +727,147 @@ import { evaluatePracticeAnswer } from "../lib/practice-utils.js";
       }`;
       ocrConfidence.classList.toggle("qb-ocr-confidence-low", confidence < 80);
     }
+
+    if (result.questionQuality) {
+      renderQuestionQuality(result.questionQuality, false);
+    }
+
+    if (result.partialAIResult) {
+      renderAIResult(result.partialAIResult);
+    }
+
+    if (result.followupText && followupStreamingBubble) {
+      followupStreamingBubble.textContent = result.followupText;
+      followupStreamingBubble.classList.remove("qb-followup-pending");
+    }
   }
 
   function renderAIResult(result) {
-    const suggestedAnswer = result.answerLabel
-      ? `${result.answerLabel}. ${result.answerText}`
-      : result.answerText;
+    const questions =
+      Array.isArray(result.questions) && result.questions.length
+        ? result.questions
+        : [result];
+    const children = [];
+    if (questions.length > 1 || result.batchIncomplete) {
+      const summary = createElement("div", "qb-batch-summary");
+      const expectedCount = Math.max(
+        questions.length,
+        Number(result.estimatedQuestionCount) || questions.length
+      );
+      summary.append(
+        createElement(
+          "div",
+          "qb-batch-summary-title",
+          result.batchIncomplete
+            ? `${questions.length} of approximately ${expectedCount} questions analyzed`
+            : `${questions.length} questions detected`
+        ),
+        createElement(
+          "div",
+          "qb-batch-summary-meta",
+          result.batchIncomplete
+            ? "Review the OCR split or analyze again."
+            : `${getModelProfile(selectedModelId).label} · ${getSubjectPreset(selectedSubject).label}`
+        )
+      );
+      summary.classList.toggle(
+        "qb-batch-summary-warning",
+        result.batchIncomplete === true
+      );
+      children.push(summary);
+    }
+    questions.forEach((question, index) => {
+      children.push(
+        createQuestionResult(question, index, questions.length)
+      );
+    });
 
+    resultCard.classList.toggle("qb-result-card-batch", questions.length > 1);
+    resultCard.replaceChildren(...children);
+    resultSection.classList.remove("qb-hidden");
+  }
+
+  function createQuestionResult(result, index, totalQuestions) {
+    const container = createElement("article", "qb-question-result");
+    if (totalQuestions > 1) {
+      const heading = createElement("div", "qb-question-result-heading");
+      heading.append(
+        createElement(
+          "span",
+          "qb-question-number",
+          `Question ${result.questionNumber || index + 1}`
+        ),
+        createElement(
+          "span",
+          `qb-confidence-badge qb-confidence-${result.confidence}`,
+          result.confidence || "low"
+        )
+      );
+      container.append(heading);
+      if (result.questionText) {
+        container.append(
+          createElement(
+            "div",
+            "qb-question-text",
+            result.questionText
+          )
+        );
+      }
+    }
+
+    const answerSelections = Array.isArray(result.answerSelections)
+      ? result.answerSelections
+      : [];
+    const suggestedAnswer = answerSelections.length
+      ? answerSelections
+          .map((selection) =>
+            selection.label
+              ? `${selection.label}. ${selection.text}`
+              : selection.text
+          )
+          .join("\n")
+      : result.answerLabel
+        ? `${result.answerLabel}. ${result.answerText}`
+        : result.answerText;
     const reliability = result.overallReliability || {
       level: "low",
       reasons: ["Reliability details are unavailable."]
     };
     const items = [
-      createResultItem("Answer", suggestedAnswer, "qb-answer"),
-      createResultItem("AI Confidence", result.confidence),
+      createResultItem(
+        answerSelections.length > 1
+          ? `Answers (${answerSelections.length})`
+          : "Answer",
+        suggestedAnswer,
+        "qb-answer"
+      ),
+      ...(totalQuestions === 1
+        ? [
+            createResultItem("AI Confidence", result.confidence),
+            createResultItem(
+              "Local Model",
+              getModelProfile(selectedModelId).label
+            ),
+            createResultItem(
+              "Subject",
+              getSubjectPreset(selectedSubject).label
+            )
+          ]
+        : []),
       createResultItem("Overall Reliability", reliability.level),
       createResultItem(
         "Reliability Reasons",
         reliability.reasons.join("\n")
       ),
-      createResultItem(
-        "Local Model",
-        getModelProfile(selectedModelId).label
-      ),
-      createResultItem("Subject", getSubjectPreset(selectedSubject).label),
       createResultItem("Why this answer?", result.shortExplanation)
     ];
 
     if (result.userAnswerEvaluation) {
       items.push(createUserAnswerEvaluation(result.userAnswerEvaluation));
     }
-
+    if (result.sourceTrace?.length) {
+      items.push(createSourceTrace(result.sourceTrace));
+    }
     if (selectedAnalysisMode === "learning") {
       if (result.optionAnalysis?.length) {
         items.push(createOptionAnalysis(result.optionAnalysis));
@@ -597,16 +883,79 @@ import { evaluatePracticeAnswer } from "../lib/practice-utils.js";
         const practiceButton = createElement(
           "button",
           "qb-practice-button",
-          "Practice Similar Question"
+          "Practice This Concept"
         );
         practiceButton.type = "button";
-        practiceButton.addEventListener("click", generatePracticeQuestion);
+        practiceButton.addEventListener("click", () =>
+          generatePracticeQuestion(result)
+        );
         items.push(practiceButton);
       }
     }
+    container.append(...items);
+    return container;
+  }
 
-    resultCard.replaceChildren(...items);
-    resultSection.classList.remove("qb-hidden");
+  function createSourceTrace(sourceTrace) {
+    const details = createElement("details", "qb-result-details");
+    const summary = createElement(
+      "summary",
+      "qb-result-details-summary",
+      "Source Trace"
+    );
+    const list = createElement("div", "qb-source-trace-list");
+    sourceTrace.forEach((trace) => {
+      const item = createElement("div", "qb-source-trace-item");
+      item.append(createElement("div", "qb-option-title", trace.claim));
+      const refs = createElement("div", "qb-source-trace-refs");
+      trace.lineRefs.forEach((lineNumber) => {
+        const button = createElement(
+          "button",
+          "qb-source-line-button",
+          `Line ${lineNumber}`
+        );
+        button.type = "button";
+        button.addEventListener("click", () => focusOcrLine(lineNumber));
+        refs.append(button);
+      });
+      if (refs.childElementCount) item.append(refs);
+      if (trace.reason) {
+        item.append(createElement("div", "qb-option-reason", trace.reason));
+      }
+      list.append(item);
+    });
+    details.append(summary, list);
+    return details;
+  }
+
+  function focusOcrLine(lineNumber) {
+    const nonEmptyLines = [];
+    const source = ocrTextarea.value;
+    let offset = 0;
+    source.split("\n").forEach((line) => {
+      const start = offset;
+      const end = offset + line.length;
+      if (line.trim()) nonEmptyLines.push({ start, end });
+      offset = end + 1;
+    });
+    const target = nonEmptyLines[lineNumber - 1];
+    if (!target) return;
+    ocrTextarea.focus();
+    ocrTextarea.setSelectionRange(target.start, target.end);
+  }
+
+  function renderQuestionQuality(questionQuality, requiresDecision) {
+    pendingQuestionQuality = questionQuality || null;
+    if (!questionQuality || questionQuality.status === "good") {
+      qualityCard.classList.add("qb-hidden");
+      return;
+    }
+    qualityReasons.textContent = [
+      ...(questionQuality.reasons || []).map((reason) => `• ${reason.message}`),
+      ...(questionQuality.suggestions || []).map((suggestion) => `• ${suggestion}`)
+    ].join("\n");
+    qualityAnalyzeButton.classList.toggle("qb-hidden", !requiresDecision);
+    qualityCard.classList.remove("qb-hidden");
   }
 
   function createOptionAnalysis(options) {
@@ -706,6 +1055,12 @@ import { evaluatePracticeAnswer } from "../lib/practice-utils.js";
     ocrConfidence.classList.remove("qb-ocr-confidence-low");
     resultCard.replaceChildren();
     practiceCard.replaceChildren();
+    followupMessages.replaceChildren();
+    followupStreamingBubble = null;
+    followupSection.classList.add("qb-hidden");
+    qualityCard.classList.add("qb-hidden");
+    pendingQuestionQuality = null;
+    lastAnalysisContext = null;
     previewSection.classList.add("qb-hidden");
     ocrSection.classList.add("qb-hidden");
     resultSection.classList.add("qb-hidden");
@@ -744,6 +1099,8 @@ import { evaluatePracticeAnswer } from "../lib/practice-utils.js";
       button.disabled = processing;
     });
     recropButton.disabled = processing || !lastScreenshotAvailable;
+    cancelButton.classList.toggle("qb-hidden", !processing);
+    cancelButton.disabled = !processing;
   }
 
   async function ensureModelOnboarding() {
@@ -939,7 +1296,8 @@ import { evaluatePracticeAnswer } from "../lib/practice-utils.js";
           OCR_LANGUAGE_KEY,
           FLOATING_BUTTON_DOCKED_KEY,
           ANALYSIS_MODE_KEY,
-          SUBJECT_PRESET_KEY
+          SUBJECT_PRESET_KEY,
+          CUSTOM_INSTRUCTIONS_KEY
         ])
         .then((storage) => {
           selectedModelId = getModelProfile(
@@ -956,11 +1314,16 @@ import { evaluatePracticeAnswer } from "../lib/practice-utils.js";
           );
           floatingButtonDocked =
             storage[FLOATING_BUTTON_DOCKED_KEY] === true;
+          customInstructions = normalizeCustomInstructions(
+            storage[CUSTOM_INSTRUCTIONS_KEY]
+          );
           modelSelect.value = selectedModelId;
           ocrLanguageSelect.value = selectedOcrLanguage;
           subjectSelect.value = selectedSubject;
           applyAnalysisMode();
           applyFloatingButtonDockState();
+          customEnabled.checked = customInstructions.enabled;
+          loadCustomInstructionEditor();
         });
     }
 
@@ -992,6 +1355,43 @@ import { evaluatePracticeAnswer } from "../lib/practice-utils.js";
     await chrome.storage.local.set({
       [SUBJECT_PRESET_KEY]: selectedSubject
     });
+    loadCustomInstructionEditor();
+  }
+
+  function loadCustomInstructionEditor() {
+    const normalized = normalizeCustomInstructions(customInstructions);
+    customEnabled.checked = normalized.enabled;
+    customText.value =
+      customScope.value === "subject"
+        ? normalized.bySubject[selectedSubject] || ""
+        : normalized.global;
+    customTemplate.value = "";
+  }
+
+  async function saveCustomInstruction() {
+    customInstructions = updateCustomInstruction(customInstructions, {
+      instruction: customText.value,
+      scope: customScope.value,
+      subject: selectedSubject,
+      enabled: customEnabled.checked
+    });
+    await chrome.storage.local.set({
+      [CUSTOM_INSTRUCTIONS_KEY]: customInstructions
+    });
+    setStatus("Custom instruction saved locally.");
+  }
+
+  async function restoreDefaultCustomInstruction() {
+    customInstructions = normalizeCustomInstructions(null);
+    await chrome.storage.local.set({
+      [CUSTOM_INSTRUCTIONS_KEY]: customInstructions
+    });
+    loadCustomInstructionEditor();
+    setStatus("Custom instructions restored to default.");
+  }
+
+  function getActiveCustomInstruction() {
+    return resolveCustomInstruction(customInstructions, selectedSubject);
   }
 
   async function setAnalysisMode(mode) {
@@ -1137,7 +1537,7 @@ import { evaluatePracticeAnswer } from "../lib/practice-utils.js";
     }
   }
 
-  async function analyzeEditedOCRText() {
+  async function analyzeEditedOCRText(analyzeAnyway = false) {
     const editedText = ocrTextarea.value.trim();
     if (editedText.length < 8) {
       showError(
@@ -1152,6 +1552,7 @@ import { evaluatePracticeAnswer } from "../lib/practice-utils.js";
     }
 
     activeRequestId = crypto.randomUUID();
+    const taskId = activeRequestId;
     cancelScheduledResourceRelease();
     clearError();
     resultSection.classList.add("qb-hidden");
@@ -1162,21 +1563,129 @@ import { evaluatePracticeAnswer } from "../lib/practice-utils.js";
     try {
       const response = await chrome.runtime.sendMessage({
         type: "QB_ANALYZE_TEXT_LOCAL",
-        requestId: activeRequestId,
+        requestId: taskId,
+        taskId,
         modelId: selectedModelId,
         ocrText: editedText,
         mode: selectedAnalysisMode,
         subject: selectedSubject,
-        userSelectedAnswer: getUserSelectedAnswer()
+        userSelectedAnswer: getUserSelectedAnswer(),
+        questionQuality: pendingQuestionQuality,
+        analyzeAnyway,
+        customInstruction: getActiveCustomInstruction()
       });
+      if (activeRequestId !== taskId) return;
       handleProcessingResponse(response);
     } catch (error) {
       showError(`Could not analyze edited text: ${error.message}`);
       setStatus("Local AI analysis failed.");
     } finally {
-      activeRequestId = null;
-      setProcessingState(false);
-      scheduleResourceRelease();
+      if (activeRequestId === taskId) {
+        activeRequestId = null;
+        setProcessingState(false);
+        scheduleResourceRelease();
+      }
+    }
+  }
+
+  async function cancelActiveTask() {
+    const taskId = activeRequestId || modelRequestId;
+    if (!taskId) return;
+    activeRequestId = null;
+    modelRequestId = null;
+    cancelButton.disabled = true;
+    setStatus("Cancelling local task...", true);
+    try {
+      await chrome.runtime.sendMessage({
+        type: "QB_CANCEL_TASK",
+        taskId
+      });
+    } catch {
+      // The task may have completed while cancellation was requested.
+    }
+    setProcessingState(false);
+    setStatus("Task cancelled.");
+  }
+
+  async function sendFollowUp(quickMessage = "") {
+    const userMessage = String(quickMessage || followupInput.value).trim();
+    if (!lastAnalysisContext?.analysisResult) {
+      showError("Analyze a question first to ask follow-up.");
+      return;
+    }
+    if (!userMessage || activeRequestId) return;
+
+    const userBubble = createElement(
+      "div",
+      "qb-followup-message qb-followup-user",
+      userMessage
+    );
+    followupMessages.append(userBubble);
+    followupStreamingBubble = createElement(
+      "div",
+      "qb-followup-message qb-followup-ai qb-followup-pending",
+      "Thinking"
+    );
+    followupMessages.append(followupStreamingBubble);
+    followupStreamingBubble.scrollIntoView({
+      block: "nearest",
+      behavior: "smooth"
+    });
+    followupInput.value = "";
+    activeRequestId = crypto.randomUUID();
+    const taskId = activeRequestId;
+    setProcessingState(true);
+    setStatus("Answering follow-up locally...", true);
+
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: "QB_FOLLOW_UP_LOCAL",
+        requestId: taskId,
+        taskId,
+        modelId: selectedModelId,
+        userMessage,
+        questionContext: {
+          ocrText: lastAnalysisContext.ocrText,
+          analysisResult: lastAnalysisContext.analysisResult,
+          subject: lastAnalysisContext.subject,
+          mode: lastAnalysisContext.mode,
+          questionQuality: lastAnalysisContext.questionQuality
+        },
+        customInstruction: getActiveCustomInstruction()
+      });
+      if (activeRequestId !== taskId) return;
+      if (!response?.ok) {
+        if (response?.cancelled) {
+          setStatus("Task cancelled.");
+          return;
+        }
+        throw new Error(response?.error || "Could not answer the follow-up.");
+      }
+      const reply =
+        followupStreamingBubble ||
+        createElement("div", "qb-followup-message qb-followup-ai");
+      reply.classList.remove("qb-followup-pending");
+      reply.replaceChildren(document.createTextNode(response.reply));
+      if (response.sourceTrace?.length) {
+        reply.append(createSourceTrace(response.sourceTrace));
+      }
+      if (!reply.isConnected) followupMessages.append(reply);
+      setStatus("Follow-up ready.");
+    } catch (error) {
+      if (followupStreamingBubble) {
+        followupStreamingBubble.classList.remove("qb-followup-pending");
+        followupStreamingBubble.textContent =
+          "Could not complete this follow-up.";
+      }
+      showError(`Could not answer follow-up: ${error.message}`);
+      setStatus("Follow-up failed.");
+    } finally {
+      followupStreamingBubble = null;
+      if (activeRequestId === taskId) {
+        activeRequestId = null;
+        setProcessingState(false);
+        scheduleResourceRelease();
+      }
     }
   }
 
@@ -1245,8 +1754,12 @@ import { evaluatePracticeAnswer } from "../lib/practice-utils.js";
     return row;
   }
 
-  async function generatePracticeQuestion() {
-    if (!lastAnalysisContext?.aiResult?.coreKnowledge) {
+  async function generatePracticeQuestion(questionResult = null) {
+    const selectedQuestion =
+      questionResult ||
+      lastAnalysisContext?.analysisResult?.questions?.[0] ||
+      lastAnalysisContext?.aiResult;
+    if (!selectedQuestion?.coreKnowledge) {
       showError(
         "A clear core concept is required before generating practice."
       );
@@ -1254,6 +1767,7 @@ import { evaluatePracticeAnswer } from "../lib/practice-utils.js";
     }
 
     activeRequestId = crypto.randomUUID();
+    const taskId = activeRequestId;
     cancelScheduledResourceRelease();
     clearError();
     setProcessingState(true);
@@ -1262,14 +1776,20 @@ import { evaluatePracticeAnswer } from "../lib/practice-utils.js";
     try {
       const response = await chrome.runtime.sendMessage({
         type: "QB_GENERATE_PRACTICE_LOCAL",
-        requestId: activeRequestId,
+        requestId: taskId,
+        taskId,
         modelId: selectedModelId,
         subject: selectedSubject,
         mode: selectedAnalysisMode,
-        ocrText: lastAnalysisContext.ocrText,
-        aiResult: lastAnalysisContext.aiResult
+        ocrText: getScopedQuestionText(selectedQuestion),
+        aiResult: selectedQuestion
       });
+      if (activeRequestId !== taskId) return;
       if (!response?.ok) {
+        if (response?.cancelled) {
+          setStatus("Task cancelled.");
+          return;
+        }
         throw new Error(
           response?.error || "Could not generate a practice question."
         );
@@ -1280,10 +1800,28 @@ import { evaluatePracticeAnswer } from "../lib/practice-utils.js";
       showError(`Could not generate practice: ${error.message}`);
       setStatus("Practice generation failed.");
     } finally {
-      activeRequestId = null;
-      setProcessingState(false);
-      scheduleResourceRelease();
+      if (activeRequestId === taskId) {
+        activeRequestId = null;
+        setProcessingState(false);
+        scheduleResourceRelease();
+      }
     }
+  }
+
+  function getScopedQuestionText(question) {
+    if (!question?.questionLineRefs?.length) {
+      return question?.questionText || lastAnalysisContext?.ocrText || "";
+    }
+    const lineByNumber = new Map(
+      lastAnalysisContext.numberedLines.lines.map((line) => [
+        line.lineNumber,
+        line.text
+      ])
+    );
+    return question.questionLineRefs
+      .map((lineNumber) => lineByNumber.get(lineNumber))
+      .filter(Boolean)
+      .join("\n");
   }
 
   function renderPracticeQuestion(practiceQuestion) {
@@ -1494,6 +2032,7 @@ import { evaluatePracticeAnswer } from "../lib/practice-utils.js";
 
   async function processRecrop(rect) {
     activeRequestId = crypto.randomUUID();
+    const taskId = activeRequestId;
     cancelScheduledResourceRelease();
     resetOutput();
     setProcessingState(true);
@@ -1502,22 +2041,27 @@ import { evaluatePracticeAnswer } from "../lib/practice-utils.js";
     try {
       const response = await chrome.runtime.sendMessage({
         type: "QB_RECROP_LAST_SCREENSHOT",
-        requestId: activeRequestId,
+        requestId: taskId,
+        taskId,
         modelId: selectedModelId,
         ocrLanguage: selectedOcrLanguage,
         mode: selectedAnalysisMode,
         subject: selectedSubject,
         userSelectedAnswer: getUserSelectedAnswer(),
+        customInstruction: getActiveCustomInstruction(),
         rect
       });
+      if (activeRequestId !== taskId) return;
       handleProcessingResponse(response);
     } catch (error) {
       showError(`Could not process the new crop: ${error.message}`);
       setStatus("Re-crop processing failed.");
     } finally {
-      activeRequestId = null;
-      setProcessingState(false);
-      scheduleResourceRelease();
+      if (activeRequestId === taskId) {
+        activeRequestId = null;
+        setProcessingState(false);
+        scheduleResourceRelease();
+      }
     }
   }
 
@@ -1559,6 +2103,11 @@ import { evaluatePracticeAnswer } from "../lib/practice-utils.js";
     renderSessionStudyNotes();
     practiceCard.replaceChildren();
     practiceSection.classList.add("qb-hidden");
+    followupMessages.replaceChildren();
+    followupStreamingBubble = null;
+    followupSection.classList.add("qb-hidden");
+    qualityCard.classList.add("qb-hidden");
+    pendingQuestionQuality = null;
     recropButton.disabled = true;
     chrome.runtime
       .sendMessage({ type: "QB_RELEASE_RESOURCES" })
