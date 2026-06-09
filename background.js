@@ -1,5 +1,8 @@
+import { TaskManager } from "./lib/task-manager.js";
+
 const OFFSCREEN_DOCUMENT_PATH = "offscreen.html";
 const activeRequests = new Map();
+const taskManager = new TaskManager();
 let processingRequestId = null;
 
 chrome.action.onClicked.addListener((tab) => {
@@ -80,12 +83,41 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === "QB_GENERATE_PRACTICE_LOCAL") {
-    handleLocalTask(message, sender, "QB_OFFSCREEN_GENERATE_PRACTICE")
+    handleLocalTask(
+      message,
+      sender,
+      "QB_OFFSCREEN_GENERATE_PRACTICE",
+      "practice"
+    )
       .then(sendResponse)
       .catch((error) => {
         sendResponse({
           ok: false,
           error: error.message || "Could not generate a practice question."
+        });
+      });
+    return true;
+  }
+
+  if (message.type === "QB_FOLLOW_UP_LOCAL") {
+    handleLocalTask(message, sender, "QB_OFFSCREEN_FOLLOW_UP", "followup")
+      .then(sendResponse)
+      .catch((error) => {
+        sendResponse({
+          ok: false,
+          error: error.message || "Could not answer the follow-up."
+        });
+      });
+    return true;
+  }
+
+  if (message.type === "QB_CANCEL_TASK") {
+    handleCancelTask(message, sender)
+      .then(sendResponse)
+      .catch((error) => {
+        sendResponse({
+          ok: false,
+          error: error.message || "Could not cancel the task."
         });
       });
     return true;
@@ -279,7 +311,7 @@ async function handlePrepareModel(message, sender) {
 async function handleCaptureProcessLocal(message, sender) {
   const windowId = sender.tab?.windowId;
   const tabId = sender.tab?.id;
-  const requestId = String(message.requestId || "");
+  const requestId = String(message.taskId || message.requestId || "");
 
   if (!Number.isInteger(windowId) || !Number.isInteger(tabId)) {
     throw new Error("Cannot capture this page because its browser window is unavailable.");
@@ -289,15 +321,13 @@ async function handleCaptureProcessLocal(message, sender) {
     throw new Error("The processing request ID is missing.");
   }
 
-  if (processingRequestId) {
-    throw new Error(
-      "QuizBuddy AI is already processing another question. Please wait for it to finish."
-    );
-  }
+  await replaceRunningTask(requestId);
 
   validateRect(message.rect);
   processingRequestId = requestId;
   activeRequests.set(requestId, tabId);
+  taskManager.create({ taskId: requestId, tabId, type: "analyze" });
+  taskManager.start(requestId);
 
   try {
     let screenshotDataUrl;
@@ -322,20 +352,36 @@ async function handleCaptureProcessLocal(message, sender) {
     const response = await chrome.runtime.sendMessage({
       type: "QB_OFFSCREEN_PROCESS_IMAGE",
       requestId,
+      taskId: requestId,
       screenshotDataUrl,
       rect: message.rect,
       modelId: message.modelId,
       ocrLanguage: message.ocrLanguage,
       mode: message.mode,
       subject: message.subject,
-      userSelectedAnswer: message.userSelectedAnswer
+      userSelectedAnswer: message.userSelectedAnswer,
+      customInstruction: message.customInstruction,
+      analyzeAnyway: message.analyzeAnyway
     });
 
     if (!response) {
       throw new Error("The offscreen document did not return a processing result.");
     }
 
-    return response;
+    if (response?.cancelled || taskManager.get(requestId)?.cancelRequested) {
+      taskManager.cancel(requestId);
+      return {
+        ok: false,
+        cancelled: true,
+        error: "Task cancelled.",
+        taskId: requestId
+      };
+    }
+    taskManager.complete(requestId);
+    return { ...response, taskId: requestId };
+  } catch (error) {
+    taskManager.fail(requestId);
+    throw error;
   } finally {
     activeRequests.delete(requestId);
     if (processingRequestId === requestId) {
@@ -344,40 +390,96 @@ async function handleCaptureProcessLocal(message, sender) {
   }
 }
 
-async function handleLocalTask(message, sender, offscreenType) {
+async function handleLocalTask(
+  message,
+  sender,
+  offscreenType,
+  taskType = "analyze"
+) {
   const tabId = sender.tab?.id;
-  const requestId = String(message.requestId || "");
+  const requestId = String(message.taskId || message.requestId || "");
 
   if (!Number.isInteger(tabId) || !requestId) {
     throw new Error("Cannot run this local task from the current page.");
   }
 
-  if (processingRequestId) {
-    throw new Error(
-      "QuizBuddy AI is busy with another local processing task."
-    );
-  }
+  await replaceRunningTask(requestId);
 
   processingRequestId = requestId;
   activeRequests.set(requestId, tabId);
+  taskManager.create({ taskId: requestId, tabId, type: taskType });
+  taskManager.start(requestId);
 
   try {
     await ensureOffscreenDocument();
     const response = await chrome.runtime.sendMessage({
       ...message,
-      type: offscreenType
+      type: offscreenType,
+      requestId,
+      taskId: requestId
     });
 
     if (!response) {
       throw new Error("The offscreen document did not return a result.");
     }
 
-    return response;
+    if (response?.cancelled || taskManager.get(requestId)?.cancelRequested) {
+      taskManager.cancel(requestId);
+      return {
+        ok: false,
+        cancelled: true,
+        error: "Task cancelled.",
+        taskId: requestId
+      };
+    }
+    taskManager.complete(requestId);
+    return { ...response, taskId: requestId };
+  } catch (error) {
+    taskManager.fail(requestId);
+    throw error;
   } finally {
     activeRequests.delete(requestId);
     if (processingRequestId === requestId) {
       processingRequestId = null;
     }
+  }
+}
+
+async function handleCancelTask(message, sender) {
+  const taskId = String(message.taskId || message.requestId || "");
+  const task = taskManager.get(taskId);
+  if (!taskId || (task && task.tabId !== sender.tab?.id)) {
+    throw new Error("Cannot cancel this task.");
+  }
+  taskManager.cancel(taskId);
+  await ensureOffscreenDocument();
+  await chrome.runtime.sendMessage({
+    type: "QB_OFFSCREEN_CANCEL_TASK",
+    taskId
+  });
+  return { ok: true, taskId };
+}
+
+async function replaceRunningTask(nextTaskId) {
+  if (!processingRequestId || processingRequestId === nextTaskId) {
+    return;
+  }
+  const previousTaskId = processingRequestId;
+  taskManager.cancel(previousTaskId);
+  try {
+    await chrome.runtime.sendMessage({
+      type: "QB_OFFSCREEN_CANCEL_TASK",
+      taskId: previousTaskId
+    });
+  } catch {
+    // The previous task may be completing while replacement starts.
+  }
+  const deadline = Date.now() + 15000;
+  while (processingRequestId === previousTaskId && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  if (processingRequestId === previousTaskId) {
+    throw new Error("The previous local task is still stopping.");
   }
 }
 

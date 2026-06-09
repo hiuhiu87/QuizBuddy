@@ -30,8 +30,26 @@ import {
   getResponseLanguageInstruction,
   resultMatchesQuestionLanguage
 } from "./lib/language-utils.js";
+import { detectQuestionQuality } from "./lib/question-quality.js";
+import {
+  buildFollowUpPrompt,
+  extractStreamingReply,
+  parseFollowUpResult
+} from "./lib/follow-up.js";
+import {
+  chunkQuestionScopes,
+  estimateQuestionCount,
+  getQuestionScopeText,
+  inferQuestionLineScopes,
+  remapQuestionToSourceScope
+} from "./lib/question-batch.js";
+import { numberOcrLines } from "./lib/source-trace.js";
 
 const MIN_OCR_TEXT_LENGTH = 8;
+const ANALYSIS_TIMEOUT_MS = 60000;
+const ANALYSIS_TOTAL_TIMEOUT_MS = 210000;
+const RECOVERY_CHUNK_SIZE = 4;
+const LONG_BATCH_CHUNK_SIZE = 2;
 
 let webllmEnginePromise = null;
 let loadedModelId = null;
@@ -41,6 +59,7 @@ let activeRequestId = null;
 let lastScreenshotDataUrl = null;
 let lastModelLoadStatus = "not-loaded";
 let lastModelError = "";
+const cancelledTaskIds = new Set();
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "QB_OFFSCREEN_MODEL_STATUS") {
@@ -129,6 +148,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           error: error.message || "Could not generate a practice question."
         });
       });
+    return true;
+  }
+
+  if (message.type === "QB_OFFSCREEN_FOLLOW_UP") {
+    runFollowUp(message)
+      .then(sendResponse)
+      .catch((error) => {
+        sendResponse({
+          ok: false,
+          cancelled: isTaskCancelled(message.taskId || message.requestId),
+          stage: "followup",
+          error: error.message || "Could not answer the follow-up."
+        });
+      });
+    return true;
+  }
+
+  if (message.type === "QB_OFFSCREEN_CANCEL_TASK") {
+    cancelTask(message.taskId || message.requestId)
+      .then(sendResponse)
+      .catch((error) => sendResponse({ ok: false, error: error.message }));
     return true;
   }
 
@@ -247,7 +287,9 @@ async function processImageLocally({
   ocrLanguage,
   mode,
   subject,
-  userSelectedAnswer
+  userSelectedAnswer,
+  customInstruction,
+  analyzeAnyway
 }) {
   if (!screenshotDataUrl || !rect) {
     throw new Error("Screenshot data or crop coordinates are missing.");
@@ -262,7 +304,9 @@ async function processImageLocally({
     ocrLanguage,
     mode,
     subject,
-    userSelectedAnswer
+    userSelectedAnswer,
+    customInstruction,
+    analyzeAnyway
   });
 }
 
@@ -287,13 +331,18 @@ async function processScreenshotLocally({
   ocrLanguage,
   mode,
   subject,
-  userSelectedAnswer
+  userSelectedAnswer,
+  customInstruction,
+  analyzeAnyway = false
 }) {
-  activeRequestId = requestId;
+  const taskId = requestId;
+  activeRequestId = taskId;
+  cancelledTaskIds.delete(taskId);
 
   try {
     reportProgress("crop", "Cropping screenshot...", 0.05);
     const croppedImageDataUrl = await cropScreenshot(screenshotDataUrl, rect);
+    throwIfCancelled(taskId);
     reportPartial({ croppedImageDataUrl });
 
     let ocrText;
@@ -307,6 +356,7 @@ async function processScreenshotLocally({
       ocrText = normalizeOCRText(ocrResult.text);
       ocrConfidence = ocrResult.confidence;
       reportPartial({ ocrText, ocrConfidence });
+      throwIfCancelled(taskId);
     } catch (error) {
       return {
         ok: false,
@@ -328,20 +378,46 @@ async function processScreenshotLocally({
       };
     }
 
+    reportProgress("quality", "Reviewing question quality...", 0.52);
+    const questionQuality = detectQuestionQuality({
+      text: ocrText,
+      ocrConfidence,
+      subject,
+      mode
+    });
+    reportPartial({ questionQuality });
+    if (questionQuality.status === "bad" && !analyzeAnyway) {
+      return {
+        ok: false,
+        requiresQualityDecision: true,
+        stage: "quality",
+        error: "This question may be incomplete or difficult to read.",
+        croppedImageDataUrl,
+        ocrText,
+        ocrConfidence,
+        questionQuality
+      };
+    }
+
     try {
       reportProgress("webllm", "Analyzing with local WebLLM...", 0.55);
       const aiResult = await runWebLLMAnalysis(ocrText, modelId, {
         ocrConfidence,
         mode,
         subject,
-        userSelectedAnswer
+        userSelectedAnswer,
+        questionQuality,
+        analyzeAnyway,
+        customInstruction
       });
+      throwIfCancelled(taskId);
       reportProgress("done", "Done.", 1);
       return {
         ok: true,
         croppedImageDataUrl,
         ocrText,
         ocrConfidence,
+        questionQuality,
         aiResult
       };
     } catch (error) {
@@ -365,7 +441,9 @@ async function analyzeEditedText({
   modelId,
   mode,
   subject,
-  userSelectedAnswer
+  userSelectedAnswer,
+  customInstruction,
+  analyzeAnyway = false
 }) {
   const normalizedText = normalizeOCRText(ocrText || "");
   if (normalizedText.length < MIN_OCR_TEXT_LENGTH) {
@@ -375,18 +453,30 @@ async function analyzeEditedText({
   }
 
   activeRequestId = requestId;
+  cancelledTaskIds.delete(requestId);
   try {
+    const questionQuality = detectQuestionQuality({
+      text: normalizedText,
+      ocrConfidence: null,
+      subject,
+      mode
+    });
     reportProgress("webllm", "Analyzing edited text locally...", 0.1);
     const aiResult = await runWebLLMAnalysis(normalizedText, modelId, {
       userCorrected: true,
       mode,
       subject,
-      userSelectedAnswer
+      userSelectedAnswer,
+      questionQuality,
+      analyzeAnyway,
+      customInstruction
     });
+    throwIfCancelled(requestId);
     reportProgress("done", "Done.", 1);
     return {
       ok: true,
       ocrText: normalizedText,
+      questionQuality,
       aiResult
     };
   } finally {
@@ -449,6 +539,121 @@ async function generatePracticeQuestion({
   } finally {
     activeRequestId = null;
   }
+}
+
+async function runFollowUp({
+  requestId,
+  taskId = requestId,
+  modelId,
+  userMessage,
+  questionContext,
+  customInstruction
+}) {
+  const id = taskId || requestId;
+  activeRequestId = id;
+  cancelledTaskIds.delete(id);
+  try {
+    const message = String(userMessage || "").trim();
+    if (!message || !questionContext?.ocrText || !questionContext?.analysisResult) {
+      throw new Error("Analyze a question before asking a follow-up.");
+    }
+    reportProgress("followup", "Reviewing the current question...", 0.15);
+    const profile = getModelProfile(modelId);
+    if (!(await hasModelInCache(profile.id, getWebLLMAppConfig()))) {
+      throw new Error("The selected local model is not available.");
+    }
+    const engine = await getWebLLMEngine(profile.id);
+    throwIfCancelled(id);
+    reportProgress("followup", "Drafting a grounded follow-up answer...", 0.45);
+    const stream = await engine.chat.completions.create({
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are QuizBuddy AI. Answer only about the current analyzed question and return valid JSON."
+        },
+        {
+          role: "user",
+          content: buildFollowUpPrompt({
+            userMessage: message,
+            questionContext,
+            customInstruction
+          })
+        }
+      ],
+      temperature: 0.15,
+      max_tokens: 320,
+      stream: true,
+      response_format: { type: "json_object" }
+    });
+    const content = await consumeFollowUpStream(stream, engine, id);
+    throwIfCancelled(id);
+    reportProgress("parse", "Checking the follow-up response...", 0.9);
+    const parsed = parseFollowUpResult(
+      content,
+      questionContext.ocrText
+    );
+    if (!parsed.ok) {
+      throw new Error(parsed.error);
+    }
+    reportProgress("done", "Follow-up ready.", 1);
+    return parsed;
+  } finally {
+    activeRequestId = null;
+  }
+}
+
+async function consumeFollowUpStream(stream, engine, taskId) {
+  let content = "";
+  let lastReply = "";
+  let lastReportAt = 0;
+  let timedOut = false;
+  const timeoutId = setTimeout(() => {
+    timedOut = true;
+    try {
+      engine.interruptGenerate?.();
+    } catch {
+      // The timeout error below remains actionable.
+    }
+  }, 45000);
+
+  try {
+    for await (const chunk of stream) {
+      throwIfCancelled(taskId);
+      content += chunk?.choices?.[0]?.delta?.content || "";
+      const reply = extractStreamingReply(content);
+      const now = Date.now();
+      if (
+        reply &&
+        reply !== lastReply &&
+        (now - lastReportAt >= 80 || reply.length - lastReply.length >= 24)
+      ) {
+        lastReply = reply;
+        lastReportAt = now;
+        reportPartial({ followupText: reply });
+      }
+      if (timedOut) {
+        break;
+      }
+    }
+  } catch (error) {
+    if (!timedOut || !extractStreamingReply(content)) {
+      throw error;
+    }
+  } finally {
+    clearTimeout(timeoutId);
+  }
+
+  const finalReply = extractStreamingReply(content);
+  if (finalReply && finalReply !== lastReply) {
+    reportPartial({ followupText: finalReply });
+  }
+  if (timedOut && !finalReply) {
+    throw new Error(
+      "The local follow-up timed out before producing an answer."
+    );
+  }
+  return content;
 }
 
 async function deleteLocalModel({ requestId, modelId }) {
@@ -694,8 +899,47 @@ async function runWebLLMAnalysis(ocrText, modelId, sourceQuality = {}) {
   }
 
   const engine = await getWebLLMEngine(profile.id);
+  const analysisDeadline = Date.now() + ANALYSIS_TOTAL_TIMEOUT_MS;
+  throwIfCancelled(activeRequestId);
   const targetLanguage = detectQuestionLanguage(ocrText);
-  const response = await engine.chat.completions.create({
+  const estimatedQuestionCount = estimateQuestionCount(ocrText);
+  if (estimatedQuestionCount >= 5) {
+    const result = await recoverQuestionsByScope({
+      engine,
+      ocrText,
+      sourceQuality,
+      targetLanguage,
+      analysisDeadline,
+      chunkSize: LONG_BATCH_CHUNK_SIZE
+    });
+    return finalizeAnalysisResult(
+      result,
+      estimatedQuestionCount,
+      sourceQuality
+    );
+  }
+  const useCompactBatchPrompt = estimatedQuestionCount >= 2;
+  const tokensPerQuestion = useCompactBatchPrompt
+    ? 220
+    : sourceQuality.mode === "quick"
+      ? 240
+      : 520;
+  const maxTokens = Math.min(
+    useCompactBatchPrompt
+      ? 1800
+      : sourceQuality.mode === "quick"
+        ? 1200
+        : 1800,
+    Math.max(
+      useCompactBatchPrompt
+        ? 500
+        : sourceQuality.mode === "quick"
+          ? 450
+          : 800,
+      estimatedQuestionCount * tokensPerQuestion
+    )
+  );
+  const response = await createChatCompletionWithTimeout(engine, {
     messages: [
       {
         role: "system",
@@ -705,15 +949,22 @@ ${getResponseLanguageInstruction(targetLanguage)}`
       },
       {
         role: "user",
-        content: buildAnalysisPrompt(ocrText, sourceQuality)
+        content: useCompactBatchPrompt
+          ? buildCompactRetryPrompt(ocrText, {
+              subject: sourceQuality.subject,
+              forceLanguage: targetLanguage
+            })
+          : buildAnalysisPrompt(ocrText, sourceQuality)
       }
     ],
     temperature: 0,
-    max_tokens: sourceQuality.mode === "quick" ? 350 : 950,
+    max_tokens: maxTokens,
     response_format: { type: "json_object" }
-  });
+  }, getRemainingAnalysisTime(analysisDeadline));
 
   const content = response?.choices?.[0]?.message?.content || "";
+  throwIfCancelled(activeRequestId);
+  reportProgress("parse", "Checking the local AI response...", 0.78);
   let result = parseAIResult(content, ocrText, {
     requestedMode: sourceQuality.mode,
     userSelectedAnswer: sourceQuality.userSelectedAnswer
@@ -722,19 +973,39 @@ ${getResponseLanguageInstruction(targetLanguage)}`
     result,
     targetLanguage
   );
-  if (result.parseStatus === "fallback" || languageMismatch) {
+  const incompleteBatch =
+    estimatedQuestionCount > 1 &&
+    result.questionCount < estimatedQuestionCount;
+  const hasUnknownAnswer = result.questions.some(isUnknownQuestion);
+  const hasAnswerCountMismatch = result.questions.some(
+    (question) => question.answerCountMismatch
+  );
+  if (
+    estimatedQuestionCount === 1 &&
+    (result.parseStatus === "fallback" ||
+      languageMismatch ||
+      incompleteBatch ||
+      hasUnknownAnswer ||
+      hasAnswerCountMismatch)
+  ) {
     reportProgress(
       "webllm",
       languageMismatch
         ? "The local model used the wrong language. Retrying in the question language..."
-        : "The local model returned malformed JSON. Retrying with a compact response...",
+        : incompleteBatch
+          ? `Only ${result.questionCount} of approximately ${estimatedQuestionCount} questions were returned. Retrying the full batch...`
+        : hasUnknownAnswer
+          ? "The local model returned Unknown for readable text. Retrying with a compact response..."
+          : hasAnswerCountMismatch
+            ? "The local model returned the wrong number of selected answers. Retrying all required selections..."
+          : "The local model returned malformed JSON. Retrying with a compact response...",
       0.82
     );
-    const retryResponse = await engine.chat.completions.create({
+    const retryResponse = await createChatCompletionWithTimeout(engine, {
       messages: [
         {
           role: "system",
-          content: `Return one small valid JSON object only. Do not use markdown.
+          content: `Return one small valid JSON object only. Do not use markdown. Solve the question; never copy schema descriptions or example values into answer fields.
 
 ${getResponseLanguageInstruction(targetLanguage)}`
         },
@@ -747,9 +1018,9 @@ ${getResponseLanguageInstruction(targetLanguage)}`
         }
       ],
       temperature: 0,
-      max_tokens: 320,
+      max_tokens: Math.min(1800, Math.max(500, estimatedQuestionCount * 320)),
       response_format: { type: "json_object" }
-    });
+    }, getRemainingAnalysisTime(analysisDeadline));
     result = parseAIResult(
       retryResponse?.choices?.[0]?.message?.content || "",
       ocrText,
@@ -758,19 +1029,342 @@ ${getResponseLanguageInstruction(targetLanguage)}`
         userSelectedAnswer: sourceQuality.userSelectedAnswer
       }
     );
+    throwIfCancelled(activeRequestId);
   }
-  const overallReliability = calculateOverallReliability({
-    ocrConfidence: sourceQuality.ocrConfidence,
-    aiConfidence: result.confidence,
-    parseStatus: result.parseStatus,
-    answerWasExpandedFromOption: result.answerWasExpandedFromOption,
-    wasOcrEdited: sourceQuality.userCorrected === true
-  });
+  if (
+    estimatedQuestionCount > 1 &&
+    (result.questionCount < estimatedQuestionCount ||
+      result.questions.some(
+        (question) =>
+          isUnknownQuestion(question) || question.answerCountMismatch
+      ))
+  ) {
+    result = await recoverQuestionsByScope({
+      engine,
+      ocrText,
+      sourceQuality,
+      targetLanguage,
+      analysisDeadline
+    });
+  }
+  return finalizeAnalysisResult(
+    result,
+    estimatedQuestionCount,
+    sourceQuality
+  );
+}
+
+function finalizeAnalysisResult(
+  result,
+  estimatedQuestionCount,
+  sourceQuality
+) {
+  const questions = result.questions.map((question) => ({
+    ...question,
+    overallReliability: calculateOverallReliability({
+      ocrConfidence: sourceQuality.ocrConfidence,
+      aiConfidence: question.confidence,
+      parseStatus: question.parseStatus || result.parseStatus,
+      answerWasExpandedFromOption: question.answerWasExpandedFromOption,
+      answerCountMismatch: question.answerCountMismatch,
+      requiredAnswerCount: question.requiredAnswerCount,
+      wasOcrEdited: sourceQuality.userCorrected === true,
+      questionQuality: sourceQuality.questionQuality,
+      analyzeAnyway: sourceQuality.analyzeAnyway === true
+    })
+  }));
+  const primary = questions[0] || result;
+  const batchIncomplete =
+    estimatedQuestionCount > 1 &&
+    (questions.length < estimatedQuestionCount ||
+      questions.some(
+        (question) =>
+          isUnknownQuestion(question) || question.answerCountMismatch
+      ));
 
   return {
     ...result,
-    overallReliability
+    ...primary,
+    questions,
+    questionCount: questions.length,
+    isBatch: questions.length > 1,
+    estimatedQuestionCount,
+    batchIncomplete,
+    parseStatus: result.parseStatus
   };
+}
+
+async function recoverQuestionsByScope({
+  engine,
+  ocrText,
+  sourceQuality,
+  targetLanguage,
+  analysisDeadline,
+  chunkSize = RECOVERY_CHUNK_SIZE
+}) {
+  const scopes = inferQuestionLineScopes(ocrText);
+  const numberedOCR = numberOcrLines(ocrText);
+  const questions = [];
+  const chunks = chunkQuestionScopes(scopes, chunkSize);
+
+  for (const [chunkIndex, chunkScopes] of chunks.entries()) {
+    throwIfCancelled(activeRequestId);
+    reportProgress(
+      "webllm",
+      `Recovering question group ${chunkIndex + 1} of ${chunks.length}...`,
+      0.84 + ((chunkIndex + 1) / chunks.length) * 0.12
+    );
+    const groupQuestions = await analyzeQuestionScopeGroup({
+      engine,
+      numberedOCR,
+      chunkScopes,
+      sourceQuality,
+      targetLanguage,
+      analysisDeadline,
+      applyUserAnswer: chunkIndex === 0
+    });
+    questions.push(...groupQuestions);
+    questions.forEach((question, index) => {
+      question.questionNumber = index + 1;
+    });
+    const partialPrimary = questions[0];
+    reportPartial({
+      partialAIResult: finalizeAnalysisResult(
+        {
+          ...partialPrimary,
+          questions: [...questions],
+          questionCount: questions.length,
+          isBatch: questions.length > 1,
+          parseStatus: questions.some(
+            (question) => question.parseStatus === "fallback"
+          )
+            ? "recovered"
+            : "parsed"
+        },
+        scopes.length,
+        sourceQuality
+      )
+    });
+  }
+
+  const primary = questions[0] || parseAIResult("", ocrText);
+  return {
+    ...primary,
+    questions,
+    questionCount: questions.length,
+    isBatch: questions.length > 1,
+    parseStatus: questions.some(
+      (question) => question.parseStatus === "fallback"
+    )
+      ? "recovered"
+      : "parsed"
+  };
+}
+
+async function analyzeQuestionScopeGroup({
+  engine,
+  numberedOCR,
+  chunkScopes,
+  sourceQuality,
+  targetLanguage,
+  analysisDeadline,
+  applyUserAnswer
+}) {
+  const sourceLineRefs = chunkScopes.flat();
+  const scopedText = getQuestionScopeText(
+    numberedOCR.lines,
+    sourceLineRefs,
+    ""
+  );
+
+  try {
+    const response = await createChatCompletionWithTimeout(engine, {
+      messages: [
+        {
+          role: "system",
+          content: `Answer every question in this scoped group and return one small valid JSON object only. Do not use markdown.
+
+${getResponseLanguageInstruction(targetLanguage)}`
+        },
+        {
+          role: "user",
+          content: buildCompactRetryPrompt(scopedText, {
+            subject: sourceQuality.subject,
+            forceLanguage: targetLanguage
+          })
+        }
+      ],
+      temperature: 0,
+      max_tokens: Math.min(800, Math.max(320, chunkScopes.length * 220)),
+      response_format: { type: "json_object" }
+    }, Math.min(45000, getRemainingAnalysisTime(analysisDeadline)));
+    const parsed = parseAIResult(
+      response?.choices?.[0]?.message?.content || "",
+      scopedText,
+      {
+        requestedMode: sourceQuality.mode,
+        userSelectedAnswer: applyUserAnswer
+          ? sourceQuality.userSelectedAnswer
+          : ""
+      }
+    );
+    if (
+      parsed.questionCount >= chunkScopes.length &&
+      !parsed.questions
+        .slice(0, chunkScopes.length)
+        .some(
+          (question) =>
+            isUnknownQuestion(question) || question.answerCountMismatch
+        )
+    ) {
+      return parsed.questions
+        .slice(0, chunkScopes.length)
+        .map((question) =>
+          remapQuestionToSourceScope(question, sourceLineRefs)
+        );
+    }
+  } catch (error) {
+    if (chunkScopes.length === 1) {
+      return [
+        createTimedOutQuestion(
+          scopedText,
+          sourceLineRefs,
+          sourceQuality.mode,
+          error
+        )
+      ];
+    }
+  }
+
+  if (chunkScopes.length > 1) {
+    const splitQuestions = [];
+    for (const [index, scope] of chunkScopes.entries()) {
+      splitQuestions.push(
+        ...(await analyzeQuestionScopeGroup({
+          engine,
+          numberedOCR,
+          chunkScopes: [scope],
+          sourceQuality,
+          targetLanguage,
+          analysisDeadline,
+          applyUserAnswer: applyUserAnswer && index === 0
+        }))
+      );
+    }
+    return splitQuestions;
+  }
+
+  return [
+    createTimedOutQuestion(
+      scopedText,
+      sourceLineRefs,
+      sourceQuality.mode,
+      new Error("The local model could not produce a reliable answer.")
+    )
+  ];
+}
+
+function createTimedOutQuestion(
+  scopedText,
+  sourceLineRefs,
+  mode,
+  error
+) {
+  const fallback = parseAIResult("", scopedText, {
+    requestedMode: mode
+  }).questions[0];
+  return {
+    ...remapQuestionToSourceScope(fallback, sourceLineRefs),
+    questionText: scopedText.split("\n").slice(0, 2).join(" "),
+    notes: error.message,
+    parseStatus: "fallback"
+  };
+}
+
+async function createChatCompletionWithTimeout(engine, request, timeoutMs) {
+  let timeoutId;
+  let timedOut = false;
+  const generation = engine.chat.completions.create(request);
+  const timeout = new Promise((resolve) => {
+    timeoutId = setTimeout(() => {
+      timedOut = true;
+      try {
+        engine.interruptGenerate?.();
+      } catch {
+        // The timeout result below remains actionable.
+      }
+      resolve(null);
+    }, timeoutMs);
+  });
+
+  try {
+    const result = await Promise.race([generation, timeout]);
+    if (!timedOut) {
+      return result;
+    }
+    await Promise.race([
+      generation.catch(() => null),
+      new Promise((resolve) => setTimeout(resolve, 1500))
+    ]);
+    throw new Error(
+      "Local AI analysis timed out for this question group."
+    );
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+function getRemainingAnalysisTime(deadline) {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) {
+    throw new Error(
+      "Local AI analysis reached its time limit. Try Quick Answer, fewer questions per crop, or a faster model."
+    );
+  }
+  return Math.min(ANALYSIS_TIMEOUT_MS, remaining);
+}
+
+function isUnknownQuestion(question) {
+  const answer = String(question?.answerText || "")
+    .trim()
+    .replace(/[.!?。]+$/u, "");
+  return /^(?:unknown|không rõ|không xác định|không đủ thông tin|n\/a)$/iu.test(
+    answer
+  );
+}
+
+async function cancelTask(taskId) {
+  const id = String(taskId || "");
+  if (!id) {
+    return { ok: false, error: "Task ID is missing." };
+  }
+  cancelledTaskIds.add(id);
+  if (activeRequestId === id && webllmEnginePromise) {
+    try {
+      const engine = await webllmEnginePromise;
+      if (typeof engine.interruptGenerate === "function") {
+        engine.interruptGenerate();
+      }
+    } catch {
+      // Cooperative cancellation still suppresses the eventual result.
+    }
+  }
+  if (activeRequestId === id && ocrWorkerPromise) {
+    await releaseOCRWorker();
+  }
+  return { ok: true, taskId: id };
+}
+
+function isTaskCancelled(taskId) {
+  return cancelledTaskIds.has(String(taskId || ""));
+}
+
+function throwIfCancelled(taskId) {
+  if (isTaskCancelled(taskId)) {
+    const error = new Error("Task cancelled.");
+    error.name = "AbortError";
+    throw error;
+  }
 }
 
 async function getWebLLMEngine(modelId) {
@@ -920,6 +1514,7 @@ function reportProgress(stage, text, progress) {
     .sendMessage({
       type: "QB_PROCESS_PROGRESS",
       requestId: activeRequestId,
+      taskId: activeRequestId,
       stage,
       text,
       progress
@@ -936,6 +1531,7 @@ function reportPartial(payload) {
     .sendMessage({
       type: "QB_PROCESS_PARTIAL",
       requestId: activeRequestId,
+      taskId: activeRequestId,
       ...payload
     })
     .catch(() => {});
