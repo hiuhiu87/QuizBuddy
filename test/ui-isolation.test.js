@@ -28,6 +28,27 @@ test("content CSS resets the shadow host", async () => {
   assert.match(css, /:host \*,[\s\S]*box-sizing:\s*border-box;/);
 });
 
+test("content UI supports a persisted system-aware dark theme", async () => {
+  const source = await readFile("content/content.js", "utf8");
+  const css = await readFile("content/content.css", "utf8");
+
+  assert.match(source, /const THEME_KEY = "qbTheme"/);
+  assert.match(source, /prefers-color-scheme: dark/);
+  assert.match(source, /\[THEME_KEY\]: selectedTheme/);
+  assert.match(source, /host\.dataset\.qbTheme = theme/);
+  assert.match(source, /qb-theme-button/);
+  assert.match(css, /:host\(\[data-qb-theme="dark"\]\)/);
+  assert.match(css, /color-scheme:\s*dark/);
+  assert.match(css, /data-qb-theme="dark"\]\) \.qb-floating-button/);
+  assert.match(css, /data-qb-theme="dark"\]\) \.qb-sidebar-body/);
+  assert.match(css, /qb-sidebar-body::\-webkit-scrollbar-thumb/);
+  assert.match(css, /data-qb-theme="dark"\]\) \.qb-model-delete-button/);
+  assert.match(css, /data-qb-theme="dark"\]\) \.qb-model-download-button/);
+  assert.match(css, /data-qb-theme="dark"\]\) \.qb-select option/);
+  assert.match(css, /data-qb-theme="dark"\]\) input::placeholder/);
+  assert.match(css, /data-qb-theme="dark"\]\) input\[type="checkbox"\]/);
+});
+
 test("manifest does not inject CSS into the webpage document", async () => {
   const manifest = JSON.parse(await readFile("manifest.json", "utf8"));
   const contentScript = manifest.content_scripts[0];
