@@ -112,7 +112,9 @@ test("minimal JSON retry prompt rejects array or string output", () => {
   assert.match(prompt, /first character must be \{/);
   assert.match(prompt, /last character must be \}/);
   assert.match(prompt, /Do not output an array, string, markdown/);
+  assert.match(prompt, /Do not output <think> tags/);
   assert.match(prompt, /"questions"/);
+  assert.match(prompt, /answerSelections, answerText, and answerLabel must describe the same selected answer/);
 });
 
 test("analysis prompts require all answers for explicit multiple-select questions", () => {
@@ -194,9 +196,12 @@ test("fast single-question prompt keeps the response small", () => {
   assert.match(prompt, /"questions"/);
   assert.match(prompt, /"answerSelections"/);
   assert.match(prompt, /one concise sentence/);
+  assert.match(prompt, /Do not output <think> tags/);
   assert.match(prompt, /answerSelections must contain exactly one answer/);
   assert.match(prompt, /answerLabel must be only the visible label/);
+  assert.match(prompt, /Never return label A with text from option B/);
   assert.match(prompt, /Missing answer choices alone is not a reason/);
+  assert.match(prompt, /userAnswerEvaluation must be null/);
   assert.doesNotMatch(prompt, /coreKnowledge/);
   assert.doesNotMatch(prompt, /notes/);
   assert.doesNotMatch(prompt, /optionAnalysis/);

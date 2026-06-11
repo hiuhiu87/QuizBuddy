@@ -12,6 +12,7 @@ import {
 } from "./lib/app-config.js";
 import {
   calculateCropPixels,
+  extractVisibleOptions,
   normalizeOCRText,
   parseAIResult
 } from "./lib/processing-utils.js";
@@ -632,6 +633,7 @@ async function generatePracticeQuestion({
       ],
       temperature: 0.35,
       max_tokens: 500,
+      extra_body: { enable_thinking: false },
       response_format: { type: "json_object" }
     });
     const practiceContent = response?.choices?.[0]?.message?.content || "";
@@ -692,6 +694,7 @@ async function runFollowUp({
       temperature: 0.15,
       max_tokens: 320,
       stream: true,
+      extra_body: { enable_thinking: false },
       response_format: { type: "json_object" }
     });
     const content = await consumeFollowUpStream(stream, engine, id);
@@ -851,8 +854,8 @@ async function runLocalOCR(croppedImageDataUrl, language) {
   const retryConfigs = [
     { mode: "sharp", psm: "6", progress: 0.5 },
     { mode: "binary", psm: "6", progress: 0.53 },
-    { mode: "color", psm: "3", progress: 0.56 },
-    { mode: "sharp", psm: "4", progress: 0.59 }
+    { mode: "sharp", psm: "4", progress: 0.56 },
+    { mode: "color", psm: "3", progress: 0.59 }
   ];
 
   for (const config of retryConfigs) {
@@ -950,9 +953,14 @@ async function createOCRWorker(tesseractLanguages) {
 
 async function prepareImageForOCR(dataUrl, mode) {
   const image = await loadImage(dataUrl);
+  const longestSide = Math.max(image.naturalWidth, image.naturalHeight, 1);
+  const shortestSide = Math.max(
+    Math.min(image.naturalWidth, image.naturalHeight),
+    1
+  );
   const scale = Math.min(
-    3,
-    Math.max(1.5, 1800 / Math.max(image.naturalWidth, 1))
+    3.25,
+    Math.max(1.5, 1800 / longestSide, 640 / shortestSide)
   );
   const padding = Math.round(24 * scale);
   const canvas = document.createElement("canvas");
@@ -995,6 +1003,9 @@ async function prepareImageForOCR(dataUrl, mode) {
 
   const shouldInvert =
     sampledPixels > 0 && brightnessTotal / sampledPixels < 110;
+  const binaryThreshold = mode === "binary"
+    ? calculateOtsuThreshold(pixels, shouldInvert)
+    : 176;
 
   for (let index = 0; index < pixels.length; index += 4) {
     const gray =
@@ -1008,7 +1019,7 @@ async function prepareImageForOCR(dataUrl, mode) {
       Math.min(255, (normalizedGray - 128) * contrastMultiplier + 128)
     );
     if (mode === "binary") {
-      contrasted = contrasted > 176 ? 255 : 0;
+      contrasted = contrasted > binaryThreshold ? 255 : 0;
     }
     pixels[index] = contrasted;
     pixels[index + 1] = contrasted;
@@ -1016,6 +1027,54 @@ async function prepareImageForOCR(dataUrl, mode) {
   }
   ctx.putImageData(imageData, 0, 0);
   return canvas.toDataURL("image/png");
+}
+
+function calculateOtsuThreshold(pixels, shouldInvert) {
+  const histogram = new Array(256).fill(0);
+  let total = 0;
+
+  for (let index = 0; index < pixels.length; index += 4) {
+    const gray = Math.round(
+      pixels[index] * 0.299 +
+        pixels[index + 1] * 0.587 +
+        pixels[index + 2] * 0.114
+    );
+    const normalizedGray = shouldInvert ? 255 - gray : gray;
+    histogram[normalizedGray] += 1;
+    total += 1;
+  }
+
+  let sum = 0;
+  for (let value = 0; value < 256; value += 1) {
+    sum += value * histogram[value];
+  }
+
+  let backgroundWeight = 0;
+  let backgroundSum = 0;
+  let maximumVariance = 0;
+  let threshold = 176;
+
+  for (let value = 0; value < 256; value += 1) {
+    backgroundWeight += histogram[value];
+    if (backgroundWeight === 0) continue;
+    const foregroundWeight = total - backgroundWeight;
+    if (foregroundWeight === 0) break;
+
+    backgroundSum += value * histogram[value];
+    const backgroundMean = backgroundSum / backgroundWeight;
+    const foregroundMean = (sum - backgroundSum) / foregroundWeight;
+    const variance =
+      backgroundWeight *
+      foregroundWeight *
+      (backgroundMean - foregroundMean) ** 2;
+
+    if (variance > maximumVariance) {
+      maximumVariance = variance;
+      threshold = value;
+    }
+  }
+
+  return Math.max(96, Math.min(210, threshold));
 }
 
 function isOCRResultReliable(result) {
@@ -1028,12 +1087,24 @@ function scoreOCRResult(result) {
   const confidence = Number(result?.data?.confidence) || 0;
   const text = normalizeOCRText(result?.data?.text || "");
   const meaningfulCharacters = (text.match(/[\p{L}\p{N}]/gu) || []).length;
+  const visibleOptionCount = extractVisibleOptions(text).length;
+  const hasQuestionMarker =
+    /\b(?:câu|cau|question|frage|aufgabe)\s*\d{1,2}\b/iu.test(text) ||
+    /[?？]/u.test(text);
+  const malformedCharacters = (text.match(/[�□■]/gu) || []).length;
   const vietnameseMarks = (
     text.match(/[ăâđêôơưàáảãạằắẳẵặầấẩẫậèéẻẽẹềếểễệìíỉĩịòóỏõọồốổỗộờớởỡợùúủũụừứửữựỳýỷỹỵ]/giu) ||
     []
   ).length;
 
-  return confidence + Math.min(20, meaningfulCharacters / 5) + vietnameseMarks;
+  return (
+    confidence +
+    Math.min(20, meaningfulCharacters / 5) +
+    Math.min(12, visibleOptionCount * 4) +
+    (hasQuestionMarker ? 4 : 0) +
+    vietnameseMarks -
+    malformedCharacters * 4
+  );
 }
 
 async function runWebLLMAnalysis(ocrText, modelId, sourceQuality = {}) {
@@ -1144,7 +1215,7 @@ ${getResponseLanguageInstruction(targetLanguage)}`
     ],
     temperature: 0,
     max_tokens: maxTokens,
-    response_format: { type: "json_object" }
+    extra_body: { enable_thinking: false }
   }, getRemainingAnalysisTime(analysisDeadline));
 
   const content = response?.choices?.[0]?.message?.content || "";
@@ -1242,7 +1313,8 @@ ${getResponseLanguageInstruction(targetLanguage)}`
             result.parseStatus === "fallback" ||
             hasUnknownAnswer
           ? 520
-          : Math.min(1800, Math.max(500, estimatedQuestionCount * 320))
+          : Math.min(1800, Math.max(500, estimatedQuestionCount * 320)),
+      extra_body: { enable_thinking: false }
     }, getRemainingAnalysisTime(analysisDeadline));
     const retryContent = retryResponse?.choices?.[0]?.message?.content || "";
     logRawAIResponse("analysis-retry", retryContent);
@@ -1432,7 +1504,7 @@ ${getResponseLanguageInstruction(targetLanguage)}`
       ],
       temperature: 0,
       max_tokens: Math.min(800, Math.max(320, chunkScopes.length * 220)),
-      response_format: { type: "json_object" }
+      extra_body: { enable_thinking: false }
     }, Math.min(45000, getRemainingAnalysisTime(analysisDeadline)));
     const content = response?.choices?.[0]?.message?.content || "";
     logRawAIResponse("analysis-scope", content);
@@ -1473,7 +1545,8 @@ ${getResponseLanguageInstruction(targetLanguage)}`
           }
         ],
         temperature: 0,
-        max_tokens: Math.min(640, Math.max(360, chunkScopes.length * 260))
+        max_tokens: Math.min(640, Math.max(360, chunkScopes.length * 260)),
+        extra_body: { enable_thinking: false }
       }, Math.min(45000, getRemainingAnalysisTime(analysisDeadline)));
       const retryContent = retryResponse?.choices?.[0]?.message?.content || "";
       logRawAIResponse("analysis-scope-retry", retryContent);
@@ -1683,7 +1756,7 @@ function hasRawSingleQuestionContradiction(content, ocrText) {
 }
 
 function parseRawAIJSONObject(content) {
-  const source = String(content || "")
+  const source = stripRawThinkingBlocks(content)
     .trim()
     .replace(/^```(?:json)?\s*/i, "")
     .replace(/\s*```$/, "");
@@ -1698,6 +1771,13 @@ function parseRawAIJSONObject(content) {
   } catch {
     return null;
   }
+}
+
+function stripRawThinkingBlocks(content) {
+  return String(content || "")
+    .replace(/<think>[\s\S]*?<\/think>/gi, "")
+    .replace(/^\s*<think>[\s\S]*$/i, "")
+    .trim();
 }
 
 function normalizeRawAnswerCount(value) {

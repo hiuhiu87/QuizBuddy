@@ -298,6 +298,45 @@ test("parseAIResult rejects JSON arrays and WebLLM invalid JSON sentinels", () =
   assert.equal(sentinelResult.parseStatus, "fallback");
 });
 
+test("parseAIResult strips Qwen thinking blocks before parsing JSON", () => {
+  const result = parseAIResult(
+    `<think>
+I should reason privately and not expose this.
+</think>
+{
+  "questions": [
+    {
+      "questionNumber": 1,
+      "questionText": "Lệnh help dùng để hiển thị trợ giúp cho các chương trình tích hợp sẵn trong shell.",
+      "questionLineRefs": [1, 2, 3],
+      "answerSelections": [{ "label": "A", "text": "Đúng" }],
+      "requiredAnswerCount": 1,
+      "answerText": "A. Đúng",
+      "answerLabel": "A",
+      "confidence": "high",
+      "shortExplanation": "help hiển thị trợ giúp cho shell builtins."
+    }
+  ]
+}`,
+    "Câu 1.\nLệnh help dùng để hiển thị trợ giúp cho các chương trình tích hợp sẵn trong shell.\nA. Đúng\nB. Sai"
+  );
+
+  assert.equal(result.answerLabel, "A");
+  assert.equal(result.answerText, "Đúng");
+  assert.equal(result.parseStatus, "parsed");
+});
+
+test("parseAIResult safely falls back for unterminated thinking output", () => {
+  const result = parseAIResult(
+    `<think>
+The answer might be A because help handles shell builtins.`,
+    "Câu 1.\nLệnh help dùng để hiển thị trợ giúp cho các chương trình tích hợp sẵn trong shell.\nA. Đúng\nB. Sai"
+  );
+
+  assert.equal(result.answerText, "Unknown");
+  assert.equal(result.parseStatus, "fallback");
+});
+
 test("parseAIResult repairs trailing commas and unquoted keys", () => {
   const result = parseAIResult(
     '{answerText:"Waiting for I/O",confidence:"high",shortExplanation:"Correct",}',
