@@ -19,6 +19,8 @@ model setup, and result-rendering flows are implemented.
 - Vanilla JavaScript, HTML, and CSS
 - Crop-first visible-tab screenshot workflow
 - Browser-local Vietnamese and English OCR
+- Local Math & Formula OCR (via ONNX runtime and transformers.js) to recognize complex equations
+- Safe, isolated LaTeX math rendering inside Shadow DOM using KaTeX with inline base64 fonts
 - Selectable OCR language and editable OCR text
 - Multi-question crop analysis with independent answers and per-question evidence
 - Quick Answer and Learning modes
@@ -37,7 +39,7 @@ model setup, and result-rendering flows are implemented.
 - Private WebGPU and model-fit diagnostics
 - Browser-local WebLLM inference through WebGPU
 - Explicit consent before downloading model weights
-- Fast 0.5B, Balanced 1.5B, and Accurate 3B local model profiles
+- Fast 0.5B, Balanced 1.5B, Accurate 3B, High Accuracy 7B, and Max Accuracy 8B local model profiles
 - Model cache status, retry, switching, and deletion controls
 - `Alt+Shift+Q` crop shortcut
 - Full answer text instead of invented A/B/C/D labels
@@ -50,7 +52,7 @@ model setup, and result-rendering flows are implemented.
 - npm 10 or newer
 - Chrome or Edge 116 or newer
 - WebGPU and browser hardware acceleration
-- Approximately 945 MB to 2.5 GB of available GPU memory, depending on model
+- Approximately 945 MB to 5.7 GB of available GPU memory, depending on model
 
 ## Quick Start
 
@@ -125,7 +127,9 @@ and verified against a pinned SHA-256 checksum.
 The Fast profile uses Qwen2.5 0.5B with lower memory use. Balanced uses
 Qwen2.5 1.5B for moderate reasoning on constrained devices. The recommended
 Accurate profile uses Qwen2.5 3B and about 2.5 GB of GPU memory for materially
-stronger reasoning. QuizBuddy AI never starts a
+stronger reasoning. High Accuracy uses Qwen2.5 7B and Max Accuracy uses Qwen3
+8B for higher-quality local reasoning on devices with about 5.1 GB to 5.7 GB
+of available GPU memory. QuizBuddy AI never starts a
 model download automatically. The user must select a model and click its
 download button. Selected model weights are then downloaded from the official
 MLC model repository and cached by WebLLM in Chrome Cache Storage for the
