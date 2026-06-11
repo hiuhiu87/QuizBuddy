@@ -17,7 +17,10 @@ import {
 } from "./lib/processing-utils.js";
 import {
   buildAnalysisPrompt,
-  buildCompactRetryPrompt
+  buildContradictionRetryPrompt,
+  buildFastSingleQuestionPrompt,
+  buildCompactRetryPrompt,
+  buildMinimalJSONAnswerPrompt
 } from "./lib/analysis-prompt.js";
 import { calculateOverallReliability } from "./lib/reliability.js";
 import {
@@ -38,22 +41,35 @@ import {
 } from "./lib/follow-up.js";
 import {
   chunkQuestionScopes,
+  detectRequiredAnswerCount,
   estimateQuestionCount,
   getQuestionScopeText,
   inferQuestionLineScopes,
   remapQuestionToSourceScope
 } from "./lib/question-batch.js";
 import { numberOcrLines } from "./lib/source-trace.js";
+import { pipeline, env } from "@huggingface/transformers";
+import {
+  detectFormulaSignals,
+  extractFormulaBoundingBoxes,
+  mergeTextAndFormulas,
+  normalizeFormulaLatex,
+  calculateFormulaConfidence
+} from "./lib/formula-detection.js";
 
 const MIN_OCR_TEXT_LENGTH = 8;
 const ANALYSIS_TIMEOUT_MS = 60000;
 const ANALYSIS_TOTAL_TIMEOUT_MS = 210000;
-const RECOVERY_CHUNK_SIZE = 4;
-const LONG_BATCH_CHUNK_SIZE = 2;
+const RECOVERY_CHUNK_SIZE = 1;
+const LONG_BATCH_CHUNK_SIZE = 1;
+const FAST_SINGLE_QUESTION_MAX_TOKENS = 420;
+const QUICK_SINGLE_QUESTION_MAX_TOKENS = 320;
+const RAW_AI_LOG_MAX_CHARS = 12000;
 
 let webllmEnginePromise = null;
 let loadedModelId = null;
 let ocrWorkerPromise = null;
+let mathOCRPipelinePromise = null;
 let loadedOCRLanguages = null;
 let activeRequestId = null;
 let lastScreenshotDataUrl = null;
@@ -340,14 +356,20 @@ async function processScreenshotLocally({
   cancelledTaskIds.delete(taskId);
 
   try {
+    const timings = {};
+    const startedAt = performance.now();
     reportProgress("crop", "Cropping screenshot...", 0.05);
     const croppedImageDataUrl = await cropScreenshot(screenshotDataUrl, rect);
+    timings.cropMs = Math.round(performance.now() - startedAt);
     throwIfCancelled(taskId);
     reportPartial({ croppedImageDataUrl });
 
     let ocrText;
     let ocrConfidence;
+    let formulas = [];
+    let hasFormulas = false;
     try {
+      const ocrStartedAt = performance.now();
       reportProgress("ocr", "Running OCR locally...", 0.12);
       const ocrResult = await runLocalOCR(
         croppedImageDataUrl,
@@ -355,14 +377,65 @@ async function processScreenshotLocally({
       );
       ocrText = normalizeOCRText(ocrResult.text);
       ocrConfidence = ocrResult.confidence;
-      reportPartial({ ocrText, ocrConfidence });
+
+      // Detect formula signals
+      const formulaSignals = detectFormulaSignals(ocrText, ocrResult);
+      if (formulaSignals.hasFormulas) {
+        reportProgress("ocr", "Detecting math formulas...", 0.44);
+        const formulaBboxes = extractFormulaBoundingBoxes(ocrResult);
+        
+        if (formulaBboxes.length > 0) {
+          hasFormulas = true;
+          reportProgress("ocr", `Recognizing ${formulaBboxes.length} formulas...`, 0.46);
+          const pipe = await getMathOCRPipeline();
+          throwIfCancelled(taskId);
+
+          for (let i = 0; i < formulaBboxes.length; i++) {
+            const bbox = formulaBboxes[i];
+            const placeholder = `$$FORMULA_${i + 1}$$`;
+            
+            // Sub-crop formula image
+            const subImage = await cropSubImage(croppedImageDataUrl, bbox);
+            throwIfCancelled(taskId);
+
+            const progressFraction = 0.46 + (i / formulaBboxes.length) * 0.05;
+            reportProgress(
+              "ocr",
+              `OCR: Recognizing formula ${i + 1}/${formulaBboxes.length}...`,
+              progressFraction
+            );
+
+            const mathResult = await pipe(subImage);
+            throwIfCancelled(taskId);
+            
+            const rawLatex = mathResult[0]?.generated_text || "";
+            const normalizedLatex = normalizeFormulaLatex(rawLatex);
+            const mathConf = calculateFormulaConfidence(normalizedLatex, 90);
+
+            formulas.push({
+              latex: normalizedLatex,
+              placeholder,
+              confidence: mathConf,
+              bbox
+            });
+          }
+
+          // Spatial merge
+          ocrText = mergeTextAndFormulas(ocrText, formulas, ocrResult.words);
+        }
+      }
+
+      timings.ocrMs = Math.round(performance.now() - ocrStartedAt);
+      reportPartial({ ocrText, ocrConfidence, formulas, hasFormulas });
       throwIfCancelled(taskId);
     } catch (error) {
       return {
         ok: false,
         stage: "ocr",
         error: error.message,
-        croppedImageDataUrl
+        croppedImageDataUrl,
+        formulas,
+        hasFormulas
       };
     }
 
@@ -374,10 +447,13 @@ async function processScreenshotLocally({
           "OCR could not detect enough text. Try cropping the complete question more clearly.",
         croppedImageDataUrl,
         ocrText,
-        ocrConfidence
+        ocrConfidence,
+        formulas,
+        hasFormulas
       };
     }
 
+    const qualityStartedAt = performance.now();
     reportProgress("quality", "Reviewing question quality...", 0.52);
     const questionQuality = detectQuestionQuality({
       text: ocrText,
@@ -385,6 +461,7 @@ async function processScreenshotLocally({
       subject,
       mode
     });
+    timings.qualityMs = Math.round(performance.now() - qualityStartedAt);
     reportPartial({ questionQuality });
     if (questionQuality.status === "bad" && !analyzeAnyway) {
       return {
@@ -395,11 +472,14 @@ async function processScreenshotLocally({
         croppedImageDataUrl,
         ocrText,
         ocrConfidence,
-        questionQuality
+        questionQuality,
+        formulas,
+        hasFormulas
       };
     }
 
     try {
+      const webllmStartedAt = performance.now();
       reportProgress("webllm", "Analyzing with local WebLLM...", 0.55);
       const aiResult = await runWebLLMAnalysis(ocrText, modelId, {
         ocrConfidence,
@@ -408,8 +488,13 @@ async function processScreenshotLocally({
         userSelectedAnswer,
         questionQuality,
         analyzeAnyway,
-        customInstruction
+        customInstruction,
+        formulas,
+        hasFormulas
       });
+      timings.webllmMs = Math.round(performance.now() - webllmStartedAt);
+      timings.totalMs = Math.round(performance.now() - startedAt);
+      logPerformanceTiming("process-image", timings);
       throwIfCancelled(taskId);
       reportProgress("done", "Done.", 1);
       return {
@@ -418,7 +503,10 @@ async function processScreenshotLocally({
         ocrText,
         ocrConfidence,
         questionQuality,
-        aiResult
+        aiResult,
+        timings,
+        formulas,
+        hasFormulas
       };
     } catch (error) {
       return {
@@ -427,7 +515,9 @@ async function processScreenshotLocally({
         error: error.message,
         croppedImageDataUrl,
         ocrText,
-        ocrConfidence
+        ocrConfidence,
+        formulas,
+        hasFormulas
       };
     }
   } finally {
@@ -443,7 +533,9 @@ async function analyzeEditedText({
   subject,
   userSelectedAnswer,
   customInstruction,
-  analyzeAnyway = false
+  analyzeAnyway = false,
+  formulas = [],
+  hasFormulas = false
 }) {
   const normalizedText = normalizeOCRText(ocrText || "");
   if (normalizedText.length < MIN_OCR_TEXT_LENGTH) {
@@ -455,12 +547,15 @@ async function analyzeEditedText({
   activeRequestId = requestId;
   cancelledTaskIds.delete(requestId);
   try {
+    const startedAt = performance.now();
+    const qualityStartedAt = performance.now();
     const questionQuality = detectQuestionQuality({
       text: normalizedText,
       ocrConfidence: null,
       subject,
       mode
     });
+    const webllmStartedAt = performance.now();
     reportProgress("webllm", "Analyzing edited text locally...", 0.1);
     const aiResult = await runWebLLMAnalysis(normalizedText, modelId, {
       userCorrected: true,
@@ -469,15 +564,26 @@ async function analyzeEditedText({
       userSelectedAnswer,
       questionQuality,
       analyzeAnyway,
-      customInstruction
+      customInstruction,
+      formulas,
+      hasFormulas
     });
+    const timings = {
+      qualityMs: Math.round(webllmStartedAt - qualityStartedAt),
+      webllmMs: Math.round(performance.now() - webllmStartedAt),
+      totalMs: Math.round(performance.now() - startedAt)
+    };
+    logPerformanceTiming("analyze-text", timings);
     throwIfCancelled(requestId);
     reportProgress("done", "Done.", 1);
     return {
       ok: true,
       ocrText: normalizedText,
       questionQuality,
-      aiResult
+      aiResult,
+      timings,
+      formulas,
+      hasFormulas
     };
   } finally {
     activeRequestId = null;
@@ -528,8 +634,10 @@ async function generatePracticeQuestion({
       max_tokens: 500,
       response_format: { type: "json_object" }
     });
+    const practiceContent = response?.choices?.[0]?.message?.content || "";
+    logRawAIResponse("practice", practiceContent);
     const result = parsePracticeResult(
-      response?.choices?.[0]?.message?.content || ""
+      practiceContent
     );
     if (!result.ok) {
       throw new Error(result.error);
@@ -587,6 +695,7 @@ async function runFollowUp({
       response_format: { type: "json_object" }
     });
     const content = await consumeFollowUpStream(stream, engine, id);
+    logRawAIResponse("followup", content);
     throwIfCancelled(id);
     reportProgress("parse", "Checking the follow-up response...", 0.9);
     const parsed = parseFollowUpResult(
@@ -729,28 +838,57 @@ async function runLocalOCR(croppedImageDataUrl, language) {
 
   reportProgress(
     "ocr",
-    "OCR confidence is low. Retrying with color details and automatic segmentation...",
+    "OCR confidence is low. Retrying with enhanced text preprocessing...",
     0.48
   );
-  const colorImage = await prepareImageForOCR(croppedImageDataUrl, "color");
-  
-  // Set fallback parameters: switch to fully automatic page segmentation (PSM 3)
-  // to handle potentially complex layouts (e.g. columns, table-like choices, or multi-question batches).
-  await worker.setParameters({
-    tessedit_pageseg_mode: "3"
-  });
+  const candidates = [
+    {
+      result: primaryResult,
+      mode: "grayscale",
+      psm: "6"
+    }
+  ];
+  const retryConfigs = [
+    { mode: "sharp", psm: "6", progress: 0.5 },
+    { mode: "binary", psm: "6", progress: 0.53 },
+    { mode: "color", psm: "3", progress: 0.56 },
+    { mode: "sharp", psm: "4", progress: 0.59 }
+  ];
 
-  const retryResult = await worker.recognize(colorImage);
+  for (const config of retryConfigs) {
+    reportProgress(
+      "ocr",
+      `OCR: retrying ${config.mode} / layout ${config.psm}...`,
+      config.progress
+    );
+    await worker.setParameters({
+      tessedit_pageseg_mode: config.psm
+    });
+    const image = await prepareImageForOCR(croppedImageDataUrl, config.mode);
+    const result = await worker.recognize(image);
+    candidates.push({
+      result,
+      mode: config.mode,
+      psm: config.psm
+    });
+    if (isOCRResultReliable(result) && scoreOCRResult(result) >= scoreOCRResult(primaryResult) + 8) {
+      break;
+    }
+  }
 
-  // Restore default PSM 6 for future runs
   await worker.setParameters({
     tessedit_pageseg_mode: "6"
   });
 
-  const bestResult =
-    scoreOCRResult(retryResult) > scoreOCRResult(primaryResult)
-      ? retryResult
-      : primaryResult;
+  const best = candidates.reduce((bestCandidate, candidate) =>
+    scoreOCRResult(candidate.result) > scoreOCRResult(bestCandidate.result)
+      ? candidate
+      : bestCandidate
+  );
+  console.info(
+    `[QuizBuddy OCR] selected ${best.mode}/psm${best.psm} score=${Math.round(scoreOCRResult(best.result))}`
+  );
+  const bestResult = best.result;
   return toOCRResult(bestResult);
 }
 
@@ -760,7 +898,8 @@ function toOCRResult(result) {
     confidence: Math.max(
       0,
       Math.min(100, Number(result?.data?.confidence) || 0)
-    )
+    ),
+    words: result?.data?.words || []
   };
 }
 
@@ -863,10 +1002,14 @@ async function prepareImageForOCR(dataUrl, mode) {
       pixels[index + 1] * 0.587 +
       pixels[index + 2] * 0.114;
     const normalizedGray = shouldInvert ? 255 - gray : gray;
-    const contrasted = Math.max(
+    const contrastMultiplier = mode === "sharp" ? 1.9 : 1.6;
+    let contrasted = Math.max(
       0,
-      Math.min(255, (normalizedGray - 128) * 1.6 + 128)
+      Math.min(255, (normalizedGray - 128) * contrastMultiplier + 128)
     );
+    if (mode === "binary") {
+      contrasted = contrasted > 176 ? 255 : 0;
+    }
     pixels[index] = contrasted;
     pixels[index + 1] = contrasted;
     pixels[index + 2] = contrasted;
@@ -916,14 +1059,17 @@ async function runWebLLMAnalysis(ocrText, modelId, sourceQuality = {}) {
   throwIfCancelled(activeRequestId);
   const targetLanguage = detectQuestionLanguage(ocrText);
   const estimatedQuestionCount = estimateQuestionCount(ocrText);
-  if (estimatedQuestionCount >= 5) {
+  if (estimatedQuestionCount >= 2) {
     const result = await recoverQuestionsByScope({
       engine,
       ocrText,
       sourceQuality,
       targetLanguage,
       analysisDeadline,
-      chunkSize: LONG_BATCH_CHUNK_SIZE
+      chunkSize:
+        estimatedQuestionCount >= 5
+          ? LONG_BATCH_CHUNK_SIZE
+          : RECOVERY_CHUNK_SIZE
     });
     return finalizeAnalysisResult(
       result,
@@ -932,23 +1078,36 @@ async function runWebLLMAnalysis(ocrText, modelId, sourceQuality = {}) {
     );
   }
   const useCompactBatchPrompt = estimatedQuestionCount >= 2;
+  const useFastSinglePrompt = estimatedQuestionCount === 1;
   const tokensPerQuestion = useCompactBatchPrompt
     ? 220
-    : sourceQuality.mode === "quick"
-      ? 240
-      : 520;
+    : useFastSinglePrompt
+      ? sourceQuality.mode === "quick"
+        ? QUICK_SINGLE_QUESTION_MAX_TOKENS
+        : FAST_SINGLE_QUESTION_MAX_TOKENS
+      : sourceQuality.mode === "quick"
+        ? 240
+        : 520;
   const maxTokens = Math.min(
     useCompactBatchPrompt
       ? 1800
-      : sourceQuality.mode === "quick"
-        ? 1200
-        : 1800,
+      : useFastSinglePrompt
+        ? sourceQuality.mode === "quick"
+          ? QUICK_SINGLE_QUESTION_MAX_TOKENS
+          : FAST_SINGLE_QUESTION_MAX_TOKENS
+        : sourceQuality.mode === "quick"
+          ? 1200
+          : 1800,
     Math.max(
       useCompactBatchPrompt
         ? 500
-        : sourceQuality.mode === "quick"
-          ? 450
-          : 800,
+        : useFastSinglePrompt
+          ? sourceQuality.mode === "quick"
+            ? 280
+            : 380
+          : sourceQuality.mode === "quick"
+            ? 450
+            : 800,
       estimatedQuestionCount * tokensPerQuestion
     )
   );
@@ -956,7 +1115,11 @@ async function runWebLLMAnalysis(ocrText, modelId, sourceQuality = {}) {
     messages: [
       {
         role: "system",
-        content: `You are QuizBuddy AI, a private local learning tutor. Answer both multiple-choice questions and question-only direct-answer prompts. Verify visible choices, expose uncertainty, and return valid JSON only.
+        content: targetLanguage === "vi"
+          ? `Bạn là QuizBuddy AI, một gia sư học tập tại địa phương và riêng tư. Trả lời cả câu hỏi trắc nghiệm và câu hỏi tự luận. Xác minh các lựa chọn hiển thị, chỉ ra sự không chắc chắn và chỉ trả về đối tượng JSON hợp lệ.
+
+${getResponseLanguageInstruction(targetLanguage)}`
+          : `You are QuizBuddy AI, a private local learning tutor. Answer both multiple-choice questions and question-only direct-answer prompts. Verify visible choices, expose uncertainty, and return valid JSON only.
 
 ${getResponseLanguageInstruction(targetLanguage)}`
       },
@@ -965,8 +1128,17 @@ ${getResponseLanguageInstruction(targetLanguage)}`
         content: useCompactBatchPrompt
           ? buildCompactRetryPrompt(ocrText, {
               subject: sourceQuality.subject,
-              forceLanguage: targetLanguage
+              forceLanguage: targetLanguage,
+              formulas: sourceQuality.formulas
             })
+          : useFastSinglePrompt
+            ? buildFastSingleQuestionPrompt(ocrText, {
+                subject: sourceQuality.subject,
+                forceLanguage: targetLanguage,
+                userSelectedAnswer: sourceQuality.userSelectedAnswer,
+                customInstruction: sourceQuality.customInstruction,
+                formulas: sourceQuality.formulas
+              })
           : buildAnalysisPrompt(ocrText, sourceQuality)
       }
     ],
@@ -976,6 +1148,7 @@ ${getResponseLanguageInstruction(targetLanguage)}`
   }, getRemainingAnalysisTime(analysisDeadline));
 
   const content = response?.choices?.[0]?.message?.content || "";
+  logRawAIResponse("analysis", content);
   throwIfCancelled(activeRequestId);
   reportProgress("parse", "Checking the local AI response...", 0.78);
   let result = parseAIResult(content, ocrText, {
@@ -993,11 +1166,17 @@ ${getResponseLanguageInstruction(targetLanguage)}`
   const hasAnswerCountMismatch = result.questions.some(
     (question) => question.answerCountMismatch
   );
+  const hasSingleQuestionContradiction =
+    estimatedQuestionCount === 1 &&
+    hasRawSingleQuestionContradiction(content, ocrText);
+  const hasMalformedModelContent = isMalformedModelContent(content);
   if (
     estimatedQuestionCount === 1 &&
-    (result.parseStatus === "fallback" ||
+    (hasMalformedModelContent ||
+      result.parseStatus === "fallback" ||
       languageMismatch ||
       incompleteBatch ||
+      hasSingleQuestionContradiction ||
       hasUnknownAnswer ||
       hasAnswerCountMismatch)
   ) {
@@ -1007,6 +1186,10 @@ ${getResponseLanguageInstruction(targetLanguage)}`
         ? "The local model used the wrong language. Retrying in the question language..."
         : incompleteBatch
           ? `Only ${result.questionCount} of approximately ${estimatedQuestionCount} questions were returned. Retrying the full batch...`
+        : hasMalformedModelContent || result.parseStatus === "fallback"
+          ? "The local model returned malformed JSON. Retrying with a strict JSON-only prompt..."
+          : hasSingleQuestionContradiction
+          ? "The local model contradicted itself. Retrying with a stricter answer-only prompt..."
         : hasUnknownAnswer
           ? "The local model returned Unknown for readable text. Retrying with a compact response..."
           : hasAnswerCountMismatch
@@ -1018,24 +1201,53 @@ ${getResponseLanguageInstruction(targetLanguage)}`
       messages: [
         {
           role: "system",
-          content: `Return one small valid JSON object only. Do not use markdown. Solve the question; never copy schema descriptions or example values into answer fields.
+          content: targetLanguage === "vi"
+            ? `Chỉ trả về một đối tượng JSON nhỏ và hợp lệ. Không sử dụng định dạng markdown. Giải quyết câu hỏi; không bao giờ sao chép mô tả lược đồ hoặc giá trị ví dụ vào các trường câu trả lời.
+
+${getResponseLanguageInstruction(targetLanguage)}`
+            : `Return one small valid JSON object only. Do not use markdown. Solve the question; never copy schema descriptions or example values into answer fields.
 
 ${getResponseLanguageInstruction(targetLanguage)}`
         },
         {
           role: "user",
-          content: buildCompactRetryPrompt(ocrText, {
-            subject: sourceQuality.subject,
-            forceLanguage: targetLanguage
-          })
+          content: hasSingleQuestionContradiction
+            ? buildContradictionRetryPrompt(ocrText, {
+                previousResponse: content,
+                subject: sourceQuality.subject,
+                forceLanguage: targetLanguage,
+                userSelectedAnswer: sourceQuality.userSelectedAnswer,
+                formulas: sourceQuality.formulas
+              })
+            : hasMalformedModelContent ||
+                result.parseStatus === "fallback" ||
+                hasUnknownAnswer
+              ? buildMinimalJSONAnswerPrompt(ocrText, {
+                  subject: sourceQuality.subject,
+                  forceLanguage: targetLanguage,
+                  userSelectedAnswer: sourceQuality.userSelectedAnswer,
+                  formulas: sourceQuality.formulas
+                })
+            : buildCompactRetryPrompt(ocrText, {
+                subject: sourceQuality.subject,
+                forceLanguage: targetLanguage,
+                formulas: sourceQuality.formulas
+              })
         }
       ],
       temperature: 0,
-      max_tokens: Math.min(1800, Math.max(500, estimatedQuestionCount * 320)),
-      response_format: { type: "json_object" }
+      max_tokens: hasSingleQuestionContradiction
+        ? 420
+        : hasMalformedModelContent ||
+            result.parseStatus === "fallback" ||
+            hasUnknownAnswer
+          ? 520
+          : Math.min(1800, Math.max(500, estimatedQuestionCount * 320))
     }, getRemainingAnalysisTime(analysisDeadline));
+    const retryContent = retryResponse?.choices?.[0]?.message?.content || "";
+    logRawAIResponse("analysis-retry", retryContent);
     result = parseAIResult(
-      retryResponse?.choices?.[0]?.message?.content || "",
+      retryContent,
       ocrText,
       {
         requestedMode: sourceQuality.mode,
@@ -1072,8 +1284,14 @@ function finalizeAnalysisResult(
   estimatedQuestionCount,
   sourceQuality
 ) {
+  const hasUserSelectedAnswer = Boolean(
+    String(sourceQuality.userSelectedAnswer || "").trim()
+  );
   const questions = result.questions.map((question) => ({
     ...question,
+    userAnswerEvaluation: hasUserSelectedAnswer
+      ? question.userAnswerEvaluation
+      : null,
     overallReliability: calculateOverallReliability({
       ocrConfidence: sourceQuality.ocrConfidence,
       aiConfidence: question.confidence,
@@ -1195,7 +1413,11 @@ async function analyzeQuestionScopeGroup({
       messages: [
         {
           role: "system",
-          content: `Answer every question in this scoped group and return one small valid JSON object only. Do not use markdown.
+          content: targetLanguage === "vi"
+            ? `Trả lời từng câu hỏi trong nhóm được thu hẹp này và chỉ trả về một đối tượng JSON nhỏ và hợp lệ. Không sử dụng định dạng markdown.
+
+${getResponseLanguageInstruction(targetLanguage)}`
+            : `Answer every question in this scoped group and return one small valid JSON object only. Do not use markdown.
 
 ${getResponseLanguageInstruction(targetLanguage)}`
         },
@@ -1203,7 +1425,8 @@ ${getResponseLanguageInstruction(targetLanguage)}`
           role: "user",
           content: buildCompactRetryPrompt(scopedText, {
             subject: sourceQuality.subject,
-            forceLanguage: targetLanguage
+            forceLanguage: targetLanguage,
+            formulas: sourceQuality.formulas
           })
         }
       ],
@@ -1211,8 +1434,10 @@ ${getResponseLanguageInstruction(targetLanguage)}`
       max_tokens: Math.min(800, Math.max(320, chunkScopes.length * 220)),
       response_format: { type: "json_object" }
     }, Math.min(45000, getRemainingAnalysisTime(analysisDeadline)));
-    const parsed = parseAIResult(
-      response?.choices?.[0]?.message?.content || "",
+    const content = response?.choices?.[0]?.message?.content || "";
+    logRawAIResponse("analysis-scope", content);
+    let parsed = parseAIResult(
+      content,
       scopedText,
       {
         requestedMode: sourceQuality.mode,
@@ -1221,15 +1446,50 @@ ${getResponseLanguageInstruction(targetLanguage)}`
           : ""
       }
     );
+
     if (
-      parsed.questionCount >= chunkScopes.length &&
-      !parsed.questions
-        .slice(0, chunkScopes.length)
-        .some(
-          (question) =>
-            isUnknownQuestion(question) || question.answerCountMismatch
-        )
+      isMalformedModelContent(content) ||
+      parsed.parseStatus === "fallback" ||
+      !hasAcceptableScopedQuestions(parsed, chunkScopes.length)
     ) {
+      const retryResponse = await createChatCompletionWithTimeout(engine, {
+        messages: [
+          {
+            role: "system",
+            content: targetLanguage === "vi"
+              ? `Chỉ trả về một đối tượng JSON hợp lệ. Ký tự đầu tiên phải là { và ký tự cuối cùng phải là }.`
+              : `Return one valid JSON object only. The first character must be { and the last character must be }.`
+          },
+          {
+            role: "user",
+            content: buildMinimalJSONAnswerPrompt(scopedText, {
+              subject: sourceQuality.subject,
+              forceLanguage: targetLanguage,
+              userSelectedAnswer: applyUserAnswer
+                ? sourceQuality.userSelectedAnswer
+                : "",
+              formulas: sourceQuality.formulas
+            })
+          }
+        ],
+        temperature: 0,
+        max_tokens: Math.min(640, Math.max(360, chunkScopes.length * 260))
+      }, Math.min(45000, getRemainingAnalysisTime(analysisDeadline)));
+      const retryContent = retryResponse?.choices?.[0]?.message?.content || "";
+      logRawAIResponse("analysis-scope-retry", retryContent);
+      parsed = parseAIResult(
+        retryContent,
+        scopedText,
+        {
+          requestedMode: sourceQuality.mode,
+          userSelectedAnswer: applyUserAnswer
+            ? sourceQuality.userSelectedAnswer
+            : ""
+        }
+      );
+    }
+
+    if (hasAcceptableScopedQuestions(parsed, chunkScopes.length)) {
       return parsed.questions
         .slice(0, chunkScopes.length)
         .map((question) =>
@@ -1346,6 +1606,160 @@ function isUnknownQuestion(question) {
   );
 }
 
+function hasAcceptableScopedQuestions(parsed, expectedCount) {
+  return (
+    parsed.questionCount >= expectedCount &&
+    !parsed.questions
+      .slice(0, expectedCount)
+      .some(
+        (question) =>
+          isUnknownQuestion(question) || question.answerCountMismatch
+      )
+  );
+}
+
+function isMalformedModelContent(content) {
+  const raw = String(content || "").trim();
+  if (!raw) {
+    return true;
+  }
+  if (/^_?invalid_?\s+json\b/i.test(raw)) {
+    return true;
+  }
+  if (/json parse error/i.test(raw)) {
+    return true;
+  }
+
+  const parsed = parseRawAIJSONObject(raw);
+  if (!parsed) {
+    return true;
+  }
+  if (Array.isArray(parsed)) {
+    return true;
+  }
+  if (
+    !Array.isArray(parsed.questions) &&
+    !Object.prototype.hasOwnProperty.call(parsed, "answerText") &&
+    !Object.prototype.hasOwnProperty.call(parsed, "answerSelections")
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function hasRawSingleQuestionContradiction(content, ocrText) {
+  const parsed = parseRawAIJSONObject(content);
+  if (!parsed) {
+    return false;
+  }
+
+  const question = Array.isArray(parsed.questions)
+    ? parsed.questions[0]
+    : parsed;
+  if (!question || typeof question !== "object") {
+    return false;
+  }
+
+  const requiredAnswerCount =
+    normalizeRawAnswerCount(question.requiredAnswerCount) ??
+    detectRequiredAnswerCount(ocrText);
+  const selections = Array.isArray(question.answerSelections)
+    ? question.answerSelections
+    : [];
+  if ((requiredAnswerCount === null || requiredAnswerCount === 1) && selections.length > 1) {
+    return true;
+  }
+
+  const visibleLabels = extractVisibleChoiceLabels(ocrText);
+  const finalLabel =
+    extractVisibleLabelFromRaw(question.answerLabel, visibleLabels) ||
+    extractVisibleLabelFromRaw(question.answerText, visibleLabels);
+  const feedbackLabel = extractCorrectLabelFromRawFeedback(
+    question.userAnswerEvaluation,
+    visibleLabels
+  );
+
+  return Boolean(finalLabel && feedbackLabel && finalLabel !== feedbackLabel);
+}
+
+function parseRawAIJSONObject(content) {
+  const source = String(content || "")
+    .trim()
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/, "");
+  const firstBrace = source.indexOf("{");
+  const lastBrace = source.lastIndexOf("}");
+  if (firstBrace < 0 || lastBrace <= firstBrace) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(source.slice(firstBrace, lastBrace + 1));
+  } catch {
+    return null;
+  }
+}
+
+function normalizeRawAnswerCount(value) {
+  if (value === null || value === undefined || value === "") {
+    return null;
+  }
+
+  const count = Number(value);
+  return Number.isInteger(count) && count >= 1 && count <= 10
+    ? count
+    : null;
+}
+
+function extractVisibleChoiceLabels(text) {
+  return new Set(
+    String(text || "")
+      .split(/\r?\n/)
+      .map((line) => line.trim().match(/^([A-Z]|\d{1,2})\s*[.):\-]\s*\S/i)?.[1])
+      .filter(Boolean)
+      .map((label) => label.toUpperCase())
+  );
+}
+
+function extractVisibleLabelFromRaw(value, visibleLabels) {
+  if (!visibleLabels.size) {
+    return "";
+  }
+
+  const source = String(value || "").trim().toUpperCase();
+  const match = source.match(/^([A-Z]|\d{1,2})(?:\s*[.):\-]|\s*$)/);
+  const label = match?.[1] || "";
+  return visibleLabels.has(label) ? label : "";
+}
+
+function extractCorrectLabelFromRawFeedback(evaluation, visibleLabels) {
+  if (!evaluation || typeof evaluation !== "object" || !visibleLabels.size) {
+    return "";
+  }
+
+  const source = removeRawDiacritics(
+    [
+      evaluation.feedback,
+      evaluation.mistakePattern,
+      evaluation.howToAvoidNextTime
+    ]
+      .filter(Boolean)
+      .join(" ")
+  ).toLowerCase();
+  const match = source.match(
+    /(?:dap an dung|correct answer|right answer|answer)\s*(?:la|is|:)?\s*([a-z0-9]{1,3})\b/i
+  );
+  const label = match?.[1]?.toUpperCase() || "";
+  return visibleLabels.has(label) ? label : "";
+}
+
+function removeRawDiacritics(value) {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/\p{Diacritic}/gu, "")
+    .replace(/[Đđ]/g, (character) => (character === "Đ" ? "D" : "d"));
+}
+
 async function cancelTask(taskId) {
   const id = String(taskId || "");
   if (!id) {
@@ -1406,7 +1820,8 @@ async function releaseLocalResources() {
 async function releaseComputeResources() {
   await Promise.allSettled([
     releaseWebLLMEngine(),
-    releaseOCRWorker()
+    releaseOCRWorker(),
+    releaseMathOCRSession()
   ]);
 }
 
@@ -1548,4 +1963,118 @@ function reportPartial(payload) {
       ...payload
     })
     .catch(() => {});
+}
+
+function logPerformanceTiming(label, timings) {
+  const summary = Object.entries(timings)
+    .map(([key, value]) => `${key}=${value}ms`)
+    .join(" ");
+  console.info(`[QuizBuddy performance] ${label} ${summary}`);
+}
+
+function logRawAIResponse(label, content) {
+  const raw = String(content || "");
+  const visibleContent = raw.slice(0, RAW_AI_LOG_MAX_CHARS);
+  const truncated = Math.max(0, raw.length - RAW_AI_LOG_MAX_CHARS);
+  const suffix =
+    truncated > 0
+      ? `\n...[truncated ${truncated} chars]`
+      : "";
+  console.info(
+    `[QuizBuddy raw AI] ${label} (${raw.length} chars)\n${visibleContent}${suffix}`
+  );
+  reportRawAIResponse({
+    label,
+    content: visibleContent,
+    rawLength: raw.length,
+    truncated
+  });
+}
+
+function reportRawAIResponse(payload) {
+  if (!activeRequestId) {
+    return;
+  }
+
+  chrome.runtime
+    .sendMessage({
+      type: "QB_PROCESS_RAW_AI",
+      requestId: activeRequestId,
+      taskId: activeRequestId,
+      ...payload
+    })
+    .catch(() => {});
+}
+
+async function getMathOCRPipeline() {
+  if (!mathOCRPipelinePromise) {
+    reportProgress("ocr", "Initializing Math OCR model...", 0.46);
+
+    env.allowLocalModels = false;
+    env.backends.onnx.wasm.wasmPaths = chrome.runtime.getURL("vendor/onnx/");
+    env.backends.onnx.wasm.numThreads = 1;
+
+    mathOCRPipelinePromise = pipeline("image-to-text", "Xenova/texify", {
+      progress_callback: (data) => {
+        if (data.status === "downloading") {
+          const progress = 0.46 + (Number(data.progress) || 0) * 0.05;
+          reportProgress(
+            "ocr",
+            `Downloading Math OCR model: ${Math.round(data.progress)}%`,
+            progress
+          );
+        }
+      }
+    }).catch((error) => {
+      mathOCRPipelinePromise = null;
+      throw error;
+    });
+  }
+  return mathOCRPipelinePromise;
+}
+
+async function releaseMathOCRSession() {
+  const pipePromise = mathOCRPipelinePromise;
+  mathOCRPipelinePromise = null;
+
+  if (!pipePromise) return;
+
+  try {
+    const pipe = await pipePromise;
+    await pipe.dispose();
+  } catch (error) {
+    // Ignore error
+  }
+}
+
+async function cropSubImage(imageDataUrl, bbox) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const canvas = document.createElement("canvas");
+        canvas.width = bbox.w;
+        canvas.height = bbox.h;
+        const ctx = canvas.getContext("2d");
+
+        ctx.drawImage(
+          img,
+          bbox.x,
+          bbox.y,
+          bbox.w,
+          bbox.h,
+          0,
+          0,
+          bbox.w,
+          bbox.h
+        );
+
+        resolve(canvas.toDataURL("image/png"));
+      } catch (error) {
+        reject(error);
+      }
+    };
+    img.onerror = () => reject(new Error("Failed to load image for sub-cropping"));
+    img.src = imageDataUrl;
+  });
 }

@@ -2,7 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   buildAnalysisPrompt,
-  buildCompactRetryPrompt
+  buildCompactRetryPrompt,
+  buildContradictionRetryPrompt,
+  buildFastSingleQuestionPrompt,
+  buildMinimalJSONAnswerPrompt
 } from "../lib/analysis-prompt.js";
 
 test("analysis prompt requires independent solving and option comparison", () => {
@@ -103,6 +106,15 @@ test("compact retry prompt requests only essential valid JSON fields", () => {
   assert.doesNotMatch(prompt, /miniExample/);
 });
 
+test("minimal JSON retry prompt rejects array or string output", () => {
+  const prompt = buildMinimalJSONAnswerPrompt("Câu 1. Lệnh help dùng để hiển thị trợ giúp.\nA. Đúng\nB. Sai");
+
+  assert.match(prompt, /first character must be \{/);
+  assert.match(prompt, /last character must be \}/);
+  assert.match(prompt, /Do not output an array, string, markdown/);
+  assert.match(prompt, /"questions"/);
+});
+
 test("analysis prompts require all answers for explicit multiple-select questions", () => {
   const ocrText =
     "Câu 62. Các loại lệnh Linux gồm (Chọn 3)\nA. Builtin\nB. BIOS\nC. Function\nD. Executable";
@@ -122,8 +134,7 @@ test("analysis prompt explicitly requires Vietnamese for Vietnamese OCR", () => 
     "Điều gì xảy ra khi tiến trình chuyển sang trạng thái chờ?"
   );
 
-  assert.match(prompt, /OCR question is Vietnamese/);
-  assert.match(prompt, /natural Vietnamese/);
+  assert.match(prompt, /tiếng Việt tự nhiên/);
 });
 
 test("analysis prompt includes source trace, quality, and protected custom instruction", () => {
@@ -158,4 +169,68 @@ test("analysis prompt exposes standalone OCR question boundaries", () => {
   assert.match(prompt, /Question 1: OCR lines 1-4/);
   assert.match(prompt, /Question 2: OCR lines 5-8/);
   assert.match(prompt, /approximately 2 question/);
+});
+
+test("analysis prompt expands math formulas", () => {
+  const ocrText = "Solve equation: $$FORMULA_1$$";
+  const formulas = [{ latex: "x^2 + y^2 = r^2", placeholder: "$$FORMULA_1$$" }];
+  
+  const prompt = buildAnalysisPrompt(ocrText, { formulas });
+  assert.match(prompt, /Solve equation: \\\(x\^2 \+ y\^2 = r\^2\\\)/);
+  assert.match(prompt, /For mathematical or scientific formulas, write them using standard LaTeX format/);
+
+  const compact = buildCompactRetryPrompt(ocrText, { formulas });
+  assert.match(compact, /Solve equation: \\\(x\^2 \+ y\^2 = r\^2\\\)/);
+  assert.match(compact, /For all mathematical\/scientific expressions in your output fields, use standard LaTeX notation/);
+});
+
+test("fast single-question prompt keeps the response small", () => {
+  const prompt = buildFastSingleQuestionPrompt(
+    "What is 2 + 2?\nA. 3\nB. 4",
+    { subject: "math" }
+  );
+
+  assert.match(prompt, /single OCR question quickly/);
+  assert.match(prompt, /"questions"/);
+  assert.match(prompt, /"answerSelections"/);
+  assert.match(prompt, /one concise sentence/);
+  assert.match(prompt, /answerSelections must contain exactly one answer/);
+  assert.match(prompt, /answerLabel must be only the visible label/);
+  assert.match(prompt, /Missing answer choices alone is not a reason/);
+  assert.doesNotMatch(prompt, /coreKnowledge/);
+  assert.doesNotMatch(prompt, /notes/);
+  assert.doesNotMatch(prompt, /optionAnalysis/);
+  assert.doesNotMatch(prompt, /miniExample/);
+  assert.doesNotMatch(prompt, /sourceTrace/);
+});
+
+test("fast single-question prompt preserves multiple-select and custom instructions", () => {
+  const prompt = buildFastSingleQuestionPrompt(
+    "Câu 62. Các loại lệnh Linux gồm (Chọn 3)\nA. Builtin\nB. BIOS\nC. Function\nD. Executable",
+    {
+      customInstruction: "Explain briefly.",
+      forceLanguage: "vi"
+    }
+  );
+
+  assert.match(prompt, /tiếng Việt tự nhiên/);
+  assert.match(prompt, /Explain briefly/);
+  assert.match(prompt, /"requiredAnswerCount": 3/);
+  assert.match(prompt, /exactly 3 selections/);
+  assert.match(prompt, /cannot override valid JSON/);
+});
+
+test("contradiction retry prompt is answer-only and includes previous raw output", () => {
+  const prompt = buildContradictionRetryPrompt(
+    "Câu 1.\nA. Đúng\nB. Sai",
+    {
+      previousResponse: '{"answerSelections":[{"label":"A"},{"label":"B"}]}',
+      forceLanguage: "vi"
+    }
+  );
+
+  assert.match(prompt, /internally inconsistent/);
+  assert.match(prompt, /Previous inconsistent response/);
+  assert.match(prompt, /answerSelections must contain exactly one answer/);
+  assert.match(prompt, /answerLabel must be only the visible label/);
 });

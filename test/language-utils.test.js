@@ -18,7 +18,7 @@ test("detectQuestionLanguage recognizes Vietnamese OCR", () => {
 test("Vietnamese response instruction is explicit", () => {
   assert.match(
     getResponseLanguageInstruction("vi"),
-    /natural Vietnamese/
+    /tiếng Việt tự nhiên/
   );
 });
 

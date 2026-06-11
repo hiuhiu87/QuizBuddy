@@ -16,11 +16,16 @@ import {
 
 test("model selection falls back to the balanced profile", () => {
   assert.equal(getModelProfile("missing-model").id, DEFAULT_MODEL_ID);
-  assert.equal(MODEL_PROFILES.length, 3);
+  assert.equal(MODEL_PROFILES.length, 5);
   assert.equal(getModelProfile(DEFAULT_MODEL_ID).label, "Balanced");
   assert.match(MODEL_PROFILES[0].label, /Lower Accuracy/);
   assert.match(MODEL_PROFILES[2].label, /Recommended/);
   assert.equal(MODEL_PROFILES[2].parameterLabel, "3B");
+  assert.equal(MODEL_PROFILES[3].id, "Qwen2.5-7B-Instruct-q4f16_1-MLC");
+  assert.equal(MODEL_PROFILES[3].parameterLabel, "7B");
+  assert.equal(MODEL_PROFILES[4].id, "Qwen3-8B-q4f16_1-MLC");
+  assert.equal(MODEL_PROFILES[4].familyLabel, "Qwen3");
+  assert.equal(MODEL_PROFILES[4].parameterLabel, "8B");
 });
 
 test("OCR language selection maps auto to Vietnamese and English", () => {

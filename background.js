@@ -192,7 +192,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (
     message.type === "QB_PROCESS_PROGRESS" ||
-    message.type === "QB_PROCESS_PARTIAL"
+    message.type === "QB_PROCESS_PARTIAL" ||
+    message.type === "QB_PROCESS_RAW_AI"
   ) {
     const tabId = activeRequests.get(message.requestId);
     if (Number.isInteger(tabId)) {

@@ -103,6 +103,25 @@ test("model download requires an explicit user click", async () => {
   assert.match(source, /chrome-extension:\/\/\$\{chrome\.runtime\.id\}/);
 });
 
+test("user answer check is scoped to analyze-again, not new OCR crops", async () => {
+  const source = await readFile("content/content.js", "utf8");
+  const captureBlock = source.match(
+    /type:\s*"QB_CAPTURE_PROCESS_LOCAL"[\s\S]*?rect:\s*\{/
+  )?.[0] || "";
+  const recropBlock = source.match(
+    /type:\s*"QB_RECROP_LAST_SCREENSHOT"[\s\S]*?rect/
+  )?.[0] || "";
+  const analyzeBlock = source.match(
+    /type:\s*"QB_ANALYZE_TEXT_LOCAL"[\s\S]*?hasFormulas/
+  )?.[0] || "";
+
+  assert.match(captureBlock, /userSelectedAnswer:\s*""/);
+  assert.match(recropBlock, /userSelectedAnswer:\s*""/);
+  assert.match(analyzeBlock, /userSelectedAnswer:\s*getUserSelectedAnswer\(\)/);
+  assert.match(source, /function clearUserAnswerCheck\(\)/);
+  assert.match(source, /clearUserAnswerCheck\(\);/);
+});
+
 test("content releases local resources after use and when the page closes", async () => {
   const source = await readFile("content/content.js", "utf8");
 
@@ -125,11 +144,10 @@ test("local inference uses accuracy-oriented decoding and context", async () => 
   assert.match(source, /role:\s*"system"/);
   assert.match(source, /temperature:\s*0/);
   assert.match(source, /estimateQuestionCount\(ocrText\)/);
-  assert.match(source, /useCompactBatchPrompt = estimatedQuestionCount >= 2/);
+  assert.match(source, /estimatedQuestionCount >= 2/);
   assert.match(source, /const ANALYSIS_TIMEOUT_MS = 60000/);
   assert.match(source, /const ANALYSIS_TOTAL_TIMEOUT_MS = 210000/);
-  assert.match(source, /const LONG_BATCH_CHUNK_SIZE = 2/);
-  assert.match(source, /estimatedQuestionCount >= 5/);
+  assert.match(source, /const LONG_BATCH_CHUNK_SIZE = 1/);
   assert.match(source, /chunkQuestionScopes\(scopes, chunkSize\)/);
   assert.match(source, /max_tokens:\s*maxTokens/);
   assert.match(source, /context_window_size:\s*4096/);

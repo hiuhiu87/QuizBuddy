@@ -87,6 +87,31 @@ test("normalizeOCRText recognizes the reported Vietnamese OCR sample", () => {
   ]);
 });
 
+test("normalizeOCRText removes degree and checkbox/bullet noise lines and labels", () => {
+  const ocrText = `Xác định thành ngữ trong đoạn văn sau: “Lí Thông lân la gợi chuyện, rồi gạ cùng
+Thạch Sanh kết nghĩa anh em. Sớm mồ côi cha mẹ, tứ cố vô thân, nay có người
+săn sóc đến mình, Thạch Sanh cảm động, vui vẻ nhận lờ! (Thạch Sanh)
+
+°
+A. Kết nghĩa anh em.
+
+°
+B. Mồ côi cha mẹ.
+C. Tứ cố vô thân.
+D. Đoạn văn trên không có thành ngữ.`;
+
+  const normalized = normalizeOCRText(ocrText);
+  // Ensure the standalone ° is completely gone
+  assert.ok(!normalized.includes("°"));
+
+  assert.deepEqual(extractVisibleOptions(normalized), [
+    { label: "A", text: "Kết nghĩa anh em." },
+    { label: "B", text: "Mồ côi cha mẹ." },
+    { label: "C", text: "Tứ cố vô thân." },
+    { label: "D", text: "Đoạn văn trên không có thành ngữ." }
+  ]);
+});
+
 test("normalizeOCRText separates inline answer choices through H", () => {
   const ocrText =
     "Cau 62.\nCac loại lệnh trong Linux gồm:(Chọn 3)\nA. Shell builtin\nB. BIOS command\nC. Shel function\nD. Executable E. Alias F. Hardware command";
@@ -258,6 +283,19 @@ test("parseAIResult returns a safe fallback for malformed output", () => {
   const result = parseAIResult("not json");
   assert.equal(result.answerText, "Unknown");
   assert.equal(result.parseStatus, "fallback");
+});
+
+test("parseAIResult rejects JSON arrays and WebLLM invalid JSON sentinels", () => {
+  const arrayResult = parseAIResult('["_"]', "Câu 1?\nA. Đúng\nB. Sai");
+  const sentinelResult = parseAIResult(
+    `_invalid_ JSON: JSON parse error at line 1 column 1 (character 1): Expecting: 'EOF' but found: '{' (invalid JSON)`,
+    "Câu 1?\nA. Đúng\nB. Sai"
+  );
+
+  assert.equal(arrayResult.answerText, "Unknown");
+  assert.equal(arrayResult.parseStatus, "fallback");
+  assert.equal(sentinelResult.answerText, "Unknown");
+  assert.equal(sentinelResult.parseStatus, "fallback");
 });
 
 test("parseAIResult repairs trailing commas and unquoted keys", () => {
@@ -527,4 +565,116 @@ test("parseAIResult resolves contradictions in single-select True/False question
   assert.equal(result.answerSelections.length, 1);
   assert.equal(result.answerSelections[0].label, "A");
   assert.equal(result.answerSelections[0].text, "Sai");
+});
+
+test("parseAIResult prefers corrected feedback over contradictory single-select selections", () => {
+  const result = parseAIResult(
+    JSON.stringify({
+      questions: [
+        {
+          questionNumber: 1,
+          questionText: "[1] Côu 1.",
+          questionLineRefs: [1],
+          answerSelections: [
+            { label: "A. Đúng", text: "A. Đúng" },
+            { label: "B. Sai", text: "B. Sai" }
+          ],
+          requiredAnswerCount: 1,
+          answerText: "B. Sai",
+          answerLabel: "B. Sai",
+          confidence: "medium",
+          shortExplanation:
+            "Lệnh help chỉ được sử dụng để hiển thị trợ giúp cho chương trình tích hợp, không phải cho shell.",
+          coreKnowledge:
+            "Lệnh help trong shell không hiển thị trợ giúp cho chương trình tích hợp.",
+          notes:
+            "Lưu ý: Đây là một câu hỏi về sự hiểu lầm về cách sử dụng lệnh help trong shell.",
+          userAnswerEvaluation: {
+            userAnswer: "B. Sai",
+            isCorrect: false,
+            feedback:
+              "Đáp án đúng là A. Đúng. Lệnh help chỉ hiển thị trợ giúp cho chương trình tích hợp, không phải cho shell.",
+            mistakePattern:
+              "Quan hệ hiểu lầm về cách sử dụng lệnh help trong shell.",
+            howToAvoidNextTime:
+              "Xem lại cách sử dụng lệnh help trong shell để tránh hiểu lầm tương tự."
+          }
+        }
+      ]
+    }),
+    "Côu 1.\nLệnh help dùng để hiển thị trợ giúp cho cóc chương trình tích hợp san trong shell.\nA. Đúng\nB. Sai"
+  );
+
+  assert.equal(result.requiredAnswerCount, 1);
+  assert.equal(result.answerSelections.length, 1);
+  assert.equal(result.answerSelections[0].label, "A");
+  assert.equal(result.answerSelections[0].text, "Đúng");
+  assert.equal(result.answerLabel, "A");
+  assert.equal(result.answerText, "Đúng");
+  assert.equal(result.answerCountMismatch, false);
+});
+
+test("parseAIResult reads Vietnamese correct-answer feedback with Đ diacritics", () => {
+  const result = parseAIResult(
+    JSON.stringify({
+      questions: [
+        {
+          questionNumber: 1,
+          questionText:
+            "[2] Lệnh help dùng để hiển thị trợ giúp cho các chương trình tích hợp sẵn trong shell.",
+          questionLineRefs: [2],
+          answerSelections: [{ label: "A", text: "B. Sai" }],
+          requiredAnswerCount: 1,
+          answerText: "B. Sai",
+          answerLabel: "B",
+          confidence: "medium",
+          shortExplanation:
+            "Lệnh help chỉ hiển thị trợ giúp cho các chương trình tích hợp sẵn trong shell.",
+          userAnswerEvaluation: {
+            userAnswer: "B",
+            isCorrect: false,
+            feedback:
+              "Đáp án đúng là A. Lệnh help chỉ hiển thị trợ giúp cho các chương trình tích hợp sẵn trong shell.",
+            mistakePattern: "Đã nhầm về chức năng của lệnh help.",
+            howToAvoidNextTime:
+              "Xem lại định nghĩa của lệnh help trong shell để hiểu rõ hơn."
+          }
+        }
+      ]
+    }),
+    "Câu 1.\nLệnh help dùng để hiển thị trợ giúp cho các chương trình tích hợp sẵn trong shell.\nA. Đúng\nB. Sai"
+  );
+
+  assert.equal(result.answerSelections.length, 1);
+  assert.equal(result.answerSelections[0].label, "A");
+  assert.equal(result.answerSelections[0].text, "Đúng");
+  assert.equal(result.answerLabel, "A");
+  assert.equal(result.answerText, "Đúng");
+});
+
+test("parseAIResult does not let compatibility summary override answerSelections", () => {
+  const result = parseAIResult(
+    JSON.stringify({
+      questions: [
+        {
+          questionNumber: 1,
+          questionText:
+            "Lệnh help dùng để hiển thị trợ giúp cho các chương trình tích hợp sẵn trong shell.",
+          answerSelections: [{ label: "A", text: "A. Đúng" }],
+          requiredAnswerCount: 1,
+          answerText: "B. Sai",
+          answerLabel: "B",
+          confidence: "medium",
+          shortExplanation: "Đây là câu đúng."
+        }
+      ]
+    }),
+    "Câu 1.\nLệnh help dùng để hiển thị trợ giúp cho các chương trình tích hợp sẵn trong shell.\nA. Đúng\nB. Sai"
+  );
+
+  assert.equal(result.answerSelections.length, 1);
+  assert.equal(result.answerSelections[0].label, "A");
+  assert.equal(result.answerSelections[0].text, "Đúng");
+  assert.equal(result.answerLabel, "A");
+  assert.equal(result.answerText, "Đúng");
 });
