@@ -5,7 +5,8 @@ import {
   buildCompactRetryPrompt,
   buildContradictionRetryPrompt,
   buildFastSingleQuestionPrompt,
-  buildMinimalJSONAnswerPrompt
+  buildMinimalJSONAnswerPrompt,
+  getSubjectGuidance
 } from "../lib/analysis-prompt.js";
 
 test("analysis prompt requires independent solving and option comparison", () => {
@@ -238,4 +239,57 @@ test("contradiction retry prompt is answer-only and includes previous raw output
   assert.match(prompt, /Previous inconsistent response/);
   assert.match(prompt, /answerSelections must contain exactly one answer/);
   assert.match(prompt, /answerLabel must be only the visible label/);
+});
+
+test("new prompt builder helpers and requirements", () => {
+  const prompt = buildAnalysisPrompt(
+    "1. Test question?\nA. Yes\nB. No",
+    { subject: "computer-science", forceLanguage: "vi" }
+  );
+
+  // 1. Prompt contains strict JSON-only instruction.
+  assert.match(prompt, /No markdown blocks/);
+  assert.match(prompt, /No comments. No trailing commas. No text before or after JSON/);
+  assert.match(prompt, /Do not output <think> tags/);
+
+  // 2. Prompt contains required fields.
+  assert.match(prompt, /"questionNumber"/);
+  assert.match(prompt, /"questionText"/);
+  assert.match(prompt, /"questionLineRefs"/);
+  assert.match(prompt, /"answerSelections"/);
+  assert.match(prompt, /"requiredAnswerCount"/);
+  assert.match(prompt, /"answerText"/);
+  assert.match(prompt, /"answerLabel"/);
+  assert.match(prompt, /"confidence"/);
+  assert.match(prompt, /"shortExplanation"/);
+  assert.match(prompt, /"coreKnowledge"/);
+  assert.match(prompt, /"notes"/);
+
+  // 3. Prompt contains selected subject guidance.
+  assert.match(prompt, /Focus on algorithms, data structures, code execution/);
+
+  // 4. Prompt contains OCR repair rules.
+  assert.match(prompt, /=== OCR REPAIR RULES ===/);
+  assert.match(prompt, /Merge broken or wrapped lines/);
+  assert.match(prompt, /O\/0/);
+  assert.match(prompt, /I\/l\/1/);
+
+  // 5. Prompt contains multiple-select instruction.
+  assert.match(prompt, /For multiple-select questions, put every selected answer/);
+
+  // 6. Prompt contains language rules.
+  assert.match(prompt, /=== LANGUAGE HANDLING RULES ===/);
+  assert.match(prompt, /Output language must follow the required response language/);
+
+  // 7. Prompt contains LaTeX rules.
+  assert.match(prompt, /=== LATEX FORMATTING RULES ===/);
+  assert.match(prompt, /use standard LaTeX notation/);
+
+  // 8. Prompt does not contain undefined/null placeholder text.
+  assert.doesNotMatch(prompt, /undefined/);
+  assert.doesNotMatch(prompt, /null null/);
+
+  // 9. getSubjectGuidance returns a valid fallback for unknown subject.
+  const fallbackGuidance = getSubjectGuidance("unknown-subject");
+  assert.match(fallbackGuidance, /general reasoning/);
 });

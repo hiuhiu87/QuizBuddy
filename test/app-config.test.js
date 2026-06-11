@@ -10,6 +10,7 @@ import {
   getModelProfile,
   getSubjectPreset,
   getTesseractLanguages,
+  isThinkingModel,
   normalizeAnalysisMode,
   normalizeOCRLanguage
 } from "../lib/app-config.js";
@@ -26,6 +27,14 @@ test("model selection falls back to the balanced profile", () => {
   assert.equal(MODEL_PROFILES[4].id, "Qwen3-8B-q4f16_1-MLC");
   assert.equal(MODEL_PROFILES[4].familyLabel, "Qwen3");
   assert.equal(MODEL_PROFILES[4].parameterLabel, "8B");
+  assert.equal(MODEL_PROFILES[4].hasThinking, true);
+});
+
+test("isThinkingModel returns true only for Qwen3-8B", () => {
+  assert.equal(isThinkingModel("Qwen3-8B-q4f16_1-MLC"), true);
+  assert.equal(isThinkingModel(DEFAULT_MODEL_ID), false);
+  assert.equal(isThinkingModel("Qwen2.5-7B-Instruct-q4f16_1-MLC"), false);
+  assert.equal(isThinkingModel("missing-model"), false);
 });
 
 test("OCR language selection maps auto to Vietnamese and English", () => {
@@ -40,5 +49,5 @@ test("analysis mode and subject presets normalize unsupported values", () => {
   assert.equal(normalizeAnalysisMode("quick"), "quick");
   assert.equal(getSubjectPreset("missing").id, DEFAULT_SUBJECT_PRESET);
   assert.equal(ANALYSIS_MODES.length, 2);
-  assert.equal(SUBJECT_PRESETS.length, 6);
+  assert.equal(SUBJECT_PRESETS.length, 12);
 });

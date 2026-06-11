@@ -7,6 +7,7 @@ import { createWorker } from "tesseract.js";
 import {
   MODEL_PROFILES,
   getModelProfile,
+  isThinkingModel,
   getTesseractLanguages,
   normalizeOCRLanguage
 } from "./lib/app-config.js";
@@ -306,7 +307,11 @@ async function processImageLocally({
   subject,
   userSelectedAnswer,
   customInstruction,
-  analyzeAnyway
+  analyzeAnyway,
+  provider,
+  openaiBaseUrl,
+  openaiApiKey,
+  openaiModel
 }) {
   if (!screenshotDataUrl || !rect) {
     throw new Error("Screenshot data or crop coordinates are missing.");
@@ -323,7 +328,11 @@ async function processImageLocally({
     subject,
     userSelectedAnswer,
     customInstruction,
-    analyzeAnyway
+    analyzeAnyway,
+    provider,
+    openaiBaseUrl,
+    openaiApiKey,
+    openaiModel
   });
 }
 
@@ -350,7 +359,11 @@ async function processScreenshotLocally({
   subject,
   userSelectedAnswer,
   customInstruction,
-  analyzeAnyway = false
+  analyzeAnyway = false,
+  provider,
+  openaiBaseUrl,
+  openaiApiKey,
+  openaiModel
 }) {
   const taskId = requestId;
   activeRequestId = taskId;
@@ -463,64 +476,21 @@ async function processScreenshotLocally({
       mode
     });
     timings.qualityMs = Math.round(performance.now() - qualityStartedAt);
-    reportPartial({ questionQuality });
-    if (questionQuality.status === "bad" && !analyzeAnyway) {
-      return {
-        ok: false,
-        requiresQualityDecision: true,
-        stage: "quality",
-        error: "This question may be incomplete or difficult to read.",
-        croppedImageDataUrl,
-        ocrText,
-        ocrConfidence,
-        questionQuality,
-        formulas,
-        hasFormulas
-      };
-    }
-
-    try {
-      const webllmStartedAt = performance.now();
-      reportProgress("webllm", "Analyzing with local WebLLM...", 0.55);
-      const aiResult = await runWebLLMAnalysis(ocrText, modelId, {
-        ocrConfidence,
-        mode,
-        subject,
-        userSelectedAnswer,
-        questionQuality,
-        analyzeAnyway,
-        customInstruction,
-        formulas,
-        hasFormulas
-      });
-      timings.webllmMs = Math.round(performance.now() - webllmStartedAt);
-      timings.totalMs = Math.round(performance.now() - startedAt);
-      logPerformanceTiming("process-image", timings);
-      throwIfCancelled(taskId);
-      reportProgress("done", "Done.", 1);
-      return {
-        ok: true,
-        croppedImageDataUrl,
-        ocrText,
-        ocrConfidence,
-        questionQuality,
-        aiResult,
-        timings,
-        formulas,
-        hasFormulas
-      };
-    } catch (error) {
-      return {
-        ok: false,
-        stage: "webllm",
-        error: error.message,
-        croppedImageDataUrl,
-        ocrText,
-        ocrConfidence,
-        formulas,
-        hasFormulas
-      };
-    }
+    timings.totalMs = Math.round(performance.now() - startedAt);
+    logPerformanceTiming("process-image", timings);
+    throwIfCancelled(taskId);
+    reportProgress("done", "Done.", 1);
+    return {
+      ok: true,
+      stage: "ocr",
+      croppedImageDataUrl,
+      ocrText,
+      ocrConfidence,
+      questionQuality,
+      timings,
+      formulas,
+      hasFormulas
+    };
   } finally {
     activeRequestId = null;
   }
@@ -536,7 +506,11 @@ async function analyzeEditedText({
   customInstruction,
   analyzeAnyway = false,
   formulas = [],
-  hasFormulas = false
+  hasFormulas = false,
+  provider,
+  openaiBaseUrl,
+  openaiApiKey,
+  openaiModel
 }) {
   const normalizedText = normalizeOCRText(ocrText || "");
   if (normalizedText.length < MIN_OCR_TEXT_LENGTH) {
@@ -557,7 +531,7 @@ async function analyzeEditedText({
       mode
     });
     const webllmStartedAt = performance.now();
-    reportProgress("webllm", "Analyzing edited text locally...", 0.1);
+    reportProgress("webllm", provider === "openai" ? "Analyzing edited text..." : "Analyzing edited text locally...", 0.1);
     const aiResult = await runWebLLMAnalysis(normalizedText, modelId, {
       userCorrected: true,
       mode,
@@ -567,7 +541,11 @@ async function analyzeEditedText({
       analyzeAnyway,
       customInstruction,
       formulas,
-      hasFormulas
+      hasFormulas,
+      provider,
+      openaiBaseUrl,
+      openaiApiKey,
+      openaiModel
     });
     const timings = {
       qualityMs: Math.round(webllmStartedAt - qualityStartedAt),
@@ -596,27 +574,23 @@ async function generatePracticeQuestion({
   ocrText,
   aiResult,
   modelId,
-  subject
+  subject,
+  provider,
+  openaiBaseUrl,
+  openaiApiKey,
+  openaiModel
 }) {
   activeRequestId = requestId;
   try {
     reportProgress(
       "practice",
-      "Generating a similar practice question locally...",
+      provider === "openai" ? "Generating a similar practice question..." : "Generating a similar practice question locally...",
       0.1
     );
-    const profile = getModelProfile(modelId);
-    const modelCached = await hasModelInCache(
-      profile.id,
-      getWebLLMAppConfig()
-    );
-    if (!modelCached) {
-      throw new Error("The selected local model is not available.");
-    }
-
-    const engine = await getWebLLMEngine(profile.id);
-    const response = await engine.chat.completions.create({
-      messages: [
+    
+    let practiceContent = "";
+    if (provider === "openai") {
+      const messages = [
         {
           role: "system",
           content:
@@ -630,13 +604,52 @@ async function generatePracticeQuestion({
             subject
           })
         }
-      ],
-      temperature: 0.35,
-      max_tokens: 500,
-      extra_body: { enable_thinking: false },
-      response_format: { type: "json_object" }
-    });
-    const practiceContent = response?.choices?.[0]?.message?.content || "";
+      ];
+      const apiConfig = { openaiBaseUrl, openaiApiKey, openaiModel };
+      const response = await callOpenAICompatibleAPI(
+        messages,
+        0.35,
+        500,
+        { type: "json_object" },
+        apiConfig,
+        activeRequestId
+      );
+      practiceContent = response?.choices?.[0]?.message?.content || "";
+    } else {
+      const profile = getModelProfile(modelId);
+      const modelCached = await hasModelInCache(
+        profile.id,
+        getWebLLMAppConfig()
+      );
+      if (!modelCached) {
+        throw new Error("The selected local model is not available.");
+      }
+
+      const engine = await getWebLLMEngine(profile.id);
+      const response = await engine.chat.completions.create({
+        messages: [
+          {
+            role: "system",
+            content:
+              "You are a local learning tutor. Create one original practice question and return valid JSON only."
+          },
+          {
+            role: "user",
+            content: buildPracticePrompt({
+              ocrText,
+              aiResult,
+              subject
+            })
+          }
+        ],
+        temperature: 0.35,
+        max_tokens: 500,
+        ...getNoThinkingExtraBody(),
+        response_format: { type: "json_object" }
+      });
+      practiceContent = response?.choices?.[0]?.message?.content || "";
+    }
+    
     logRawAIResponse("practice", practiceContent);
     const result = parsePracticeResult(
       practiceContent
@@ -657,7 +670,11 @@ async function runFollowUp({
   modelId,
   userMessage,
   questionContext,
-  customInstruction
+  customInstruction,
+  provider,
+  openaiBaseUrl,
+  openaiApiKey,
+  openaiModel
 }) {
   const id = taskId || requestId;
   activeRequestId = id;
@@ -668,15 +685,12 @@ async function runFollowUp({
       throw new Error("Analyze a question before asking a follow-up.");
     }
     reportProgress("followup", "Reviewing the current question...", 0.15);
-    const profile = getModelProfile(modelId);
-    if (!(await hasModelInCache(profile.id, getWebLLMAppConfig()))) {
-      throw new Error("The selected local model is not available.");
-    }
-    const engine = await getWebLLMEngine(profile.id);
-    throwIfCancelled(id);
-    reportProgress("followup", "Drafting a grounded follow-up answer...", 0.45);
-    const stream = await engine.chat.completions.create({
-      messages: [
+    
+    let content = "";
+    if (provider === "openai") {
+      throwIfCancelled(id);
+      reportProgress("followup", "Drafting a grounded follow-up answer...", 0.45);
+      const messages = [
         {
           role: "system",
           content:
@@ -690,25 +704,58 @@ async function runFollowUp({
             customInstruction
           })
         }
-      ],
-      temperature: 0.15,
-      max_tokens: 320,
-      stream: true,
-      extra_body: { enable_thinking: false },
-      response_format: { type: "json_object" }
-    });
-    const content = await consumeFollowUpStream(stream, engine, id);
+      ];
+      const apiConfig = { openaiBaseUrl, openaiApiKey, openaiModel };
+      const stream = callOpenAICompatibleAPIStream(
+        messages,
+        0.15,
+        320,
+        { type: "json_object" },
+        apiConfig,
+        id
+      );
+      content = await consumeFollowUpStream(stream, null, id);
+    } else {
+      const profile = getModelProfile(modelId);
+      if (!(await hasModelInCache(profile.id, getWebLLMAppConfig()))) {
+        throw new Error("The selected local model is not available.");
+      }
+      const engine = await getWebLLMEngine(profile.id);
+      throwIfCancelled(id);
+      reportProgress("followup", "Drafting a grounded follow-up answer...", 0.45);
+      const stream = await engine.chat.completions.create({
+        messages: [
+          {
+            role: "system",
+            content:
+              "You are QuizBuddy AI. Answer only about the current analyzed question and return valid JSON."
+          },
+          {
+            role: "user",
+            content: buildFollowUpPrompt({
+              userMessage: message,
+              questionContext,
+              customInstruction
+            })
+          }
+        ],
+        temperature: 0.15,
+        max_tokens: 320,
+        stream: true,
+        ...getNoThinkingExtraBody(),
+        response_format: { type: "json_object" }
+      });
+      content = await consumeFollowUpStream(stream, engine, id);
+    }
+    
     logRawAIResponse("followup", content);
     throwIfCancelled(id);
     reportProgress("parse", "Checking the follow-up response...", 0.9);
-    const parsed = parseFollowUpResult(
-      content,
-      questionContext.ocrText
-    );
+    const parsed = parseFollowUpResult(content);
     if (!parsed.ok) {
       throw new Error(parsed.error);
     }
-    reportProgress("done", "Follow-up ready.", 1);
+    reportProgress("done", "Follow-up response ready.", 1);
     return parsed;
   } finally {
     activeRequestId = null;
@@ -723,7 +770,7 @@ async function consumeFollowUpStream(stream, engine, taskId) {
   const timeoutId = setTimeout(() => {
     timedOut = true;
     try {
-      engine.interruptGenerate?.();
+      engine?.interruptGenerate?.();
     } catch {
       // The timeout error below remains actionable.
     }
@@ -958,14 +1005,21 @@ async function prepareImageForOCR(dataUrl, mode) {
     Math.min(image.naturalWidth, image.naturalHeight),
     1
   );
-  const scale = Math.min(
+  let scale = Math.min(
     3.25,
     Math.max(1.5, 1800 / longestSide, 640 / shortestSide)
   );
+
+  // Discrete scale factors (multiples of 0.25) prevent scaling interpolation
+  // jittering when the crop size varies slightly.
+  scale = Math.round(scale * 4) / 4;
+
   const padding = Math.round(24 * scale);
   const canvas = document.createElement("canvas");
-  canvas.width = Math.round(image.naturalWidth * scale) + padding * 2;
-  canvas.height = Math.round(image.naturalHeight * scale) + padding * 2;
+  const width = Math.round(image.naturalWidth * scale) + padding * 2;
+  const height = Math.round(image.naturalHeight * scale) + padding * 2;
+  canvas.width = width;
+  canvas.height = height;
   const ctx = canvas.getContext("2d", { willReadFrequently: true });
 
   if (!ctx) {
@@ -990,58 +1044,110 @@ async function prepareImageForOCR(dataUrl, mode) {
 
   const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
   const pixels = imageData.data;
-  let brightnessTotal = 0;
-  let sampledPixels = 0;
 
-  for (let index = 0; index < pixels.length; index += 40) {
-    brightnessTotal +=
-      pixels[index] * 0.299 +
-      pixels[index + 1] * 0.587 +
-      pixels[index + 2] * 0.114;
-    sampledPixels += 1;
+  // 1. Detect background brightness using robust border sampling.
+  // This is highly stable against large dark diagrams in the center of the crop.
+  let borderSum = 0;
+  let borderCount = 0;
+  const borderThickness = Math.max(2, Math.round(3 * scale));
+  const sampleStep = 8;
+  for (let y = 0; y < height; y += sampleStep) {
+    const isRowBorder = y < borderThickness || y >= height - borderThickness;
+    for (let x = 0; x < width; x += sampleStep) {
+      if (isRowBorder || x < borderThickness || x >= width - borderThickness) {
+        const idx = (y * width + x) * 4;
+        borderSum += pixels[idx] * 0.299 + pixels[idx + 1] * 0.587 + pixels[idx + 2] * 0.114;
+        borderCount++;
+      }
+    }
+  }
+  const borderAvg = borderCount > 0 ? borderSum / borderCount : 255;
+  const shouldInvert = borderAvg < 128;
+
+  // 2. Convert to grayscale buffer and normalize inversion
+  const grayBuffer = new Uint8ClampedArray(width * height);
+  for (let i = 0; i < grayBuffer.length; i++) {
+    const idx = i * 4;
+    const gray = pixels[idx] * 0.299 + pixels[idx + 1] * 0.587 + pixels[idx + 2] * 0.114;
+    grayBuffer[i] = shouldInvert ? 255 - gray : gray;
   }
 
-  const shouldInvert =
-    sampledPixels > 0 && brightnessTotal / sampledPixels < 110;
+  // 3. Apply a true sharpening convolution filter.
+  // Enhances edges for Tesseract, dramatically improving OCR accuracy on screens.
+  let processedBuffer = grayBuffer;
+  if (mode === "grayscale" || mode === "sharp" || mode === "binary") {
+    processedBuffer = applySharpenFilter(grayBuffer, width, height);
+  }
+
+  // 4. Determine binary threshold if mode is binary
   const binaryThreshold = mode === "binary"
-    ? calculateOtsuThreshold(pixels, shouldInvert)
+    ? calculateOtsuThreshold(processedBuffer)
     : 176;
 
-  for (let index = 0; index < pixels.length; index += 4) {
-    const gray =
-      pixels[index] * 0.299 +
-      pixels[index + 1] * 0.587 +
-      pixels[index + 2] * 0.114;
-    const normalizedGray = shouldInvert ? 255 - gray : gray;
-    const contrastMultiplier = mode === "sharp" ? 1.9 : 1.6;
+  // 5. Apply contrast enhancement and copy back to canvas pixels
+  const contrastMultiplier = mode === "sharp" ? 1.9 : 1.6;
+  for (let i = 0; i < processedBuffer.length; i++) {
+    const gray = processedBuffer[i];
     let contrasted = Math.max(
       0,
-      Math.min(255, (normalizedGray - 128) * contrastMultiplier + 128)
+      Math.min(255, (gray - 128) * contrastMultiplier + 128)
     );
     if (mode === "binary") {
       contrasted = contrasted > binaryThreshold ? 255 : 0;
     }
-    pixels[index] = contrasted;
-    pixels[index + 1] = contrasted;
-    pixels[index + 2] = contrasted;
+    const idx = i * 4;
+    pixels[idx] = contrasted;
+    pixels[idx + 1] = contrasted;
+    pixels[idx + 2] = contrasted;
+    pixels[idx + 3] = 255; // Ensure fully opaque
   }
+
   ctx.putImageData(imageData, 0, 0);
   return canvas.toDataURL("image/png");
 }
 
-function calculateOtsuThreshold(pixels, shouldInvert) {
-  const histogram = new Array(256).fill(0);
-  let total = 0;
+function applySharpenFilter(grayBuffer, width, height) {
+  const output = new Uint8ClampedArray(width * height);
+  // Standard 3x3 sharpening convolution kernel:
+  //  0 -1  0
+  // -1  5 -1
+  //  0 -1  0
+  for (let y = 1; y < height - 1; y++) {
+    const yWidth = y * width;
+    const prevY = yWidth - width;
+    const nextY = yWidth + width;
+    for (let x = 1; x < width - 1; x++) {
+      const idx = yWidth + x;
+      const center = grayBuffer[idx];
+      const top = grayBuffer[prevY + x];
+      const bottom = grayBuffer[nextY + x];
+      const left = grayBuffer[idx - 1];
+      const right = grayBuffer[idx + 1];
 
-  for (let index = 0; index < pixels.length; index += 4) {
-    const gray = Math.round(
-      pixels[index] * 0.299 +
-        pixels[index + 1] * 0.587 +
-        pixels[index + 2] * 0.114
-    );
-    const normalizedGray = shouldInvert ? 255 - gray : gray;
-    histogram[normalizedGray] += 1;
-    total += 1;
+      const val = 5 * center - (top + bottom + left + right);
+      output[idx] = val < 0 ? 0 : (val > 255 ? 255 : val);
+    }
+  }
+
+  // Copy boundaries to prevent black edge artifacts
+  for (let x = 0; x < width; x++) {
+    output[x] = grayBuffer[x];
+    output[(height - 1) * width + x] = grayBuffer[(height - 1) * width + x];
+  }
+  for (let y = 0; y < height; y++) {
+    output[y * width] = grayBuffer[y * width];
+    output[y * width + (width - 1)] = grayBuffer[y * width + (width - 1)];
+  }
+
+  return output;
+}
+
+function calculateOtsuThreshold(grayBuffer) {
+  const histogram = new Array(256).fill(0);
+  const total = grayBuffer.length;
+
+  for (let i = 0; i < total; i++) {
+    histogram[grayBuffer[i]] += 1;
   }
 
   let sum = 0;
@@ -1108,6 +1214,11 @@ function scoreOCRResult(result) {
 }
 
 async function runWebLLMAnalysis(ocrText, modelId, sourceQuality = {}) {
+  if (sourceQuality.provider === "openai") {
+    reportProgress("webllm", "Analyzing with OpenAI Compatible API...", 0.6);
+    return runOpenAIAnalysis(ocrText, sourceQuality);
+  }
+
   if (!navigator.gpu) {
     throw new Error(
       "WebGPU is not available in this browser. Use a supported Chrome/Edge version and enable hardware acceleration."
@@ -1215,7 +1326,8 @@ ${getResponseLanguageInstruction(targetLanguage)}`
     ],
     temperature: 0,
     max_tokens: maxTokens,
-    extra_body: { enable_thinking: false }
+    ...getNoThinkingExtraBody(),
+    response_format: { type: "json_object" }
   }, getRemainingAnalysisTime(analysisDeadline));
 
   const content = response?.choices?.[0]?.message?.content || "";
@@ -1239,7 +1351,8 @@ ${getResponseLanguageInstruction(targetLanguage)}`
   );
   const hasSingleQuestionContradiction =
     estimatedQuestionCount === 1 &&
-    hasRawSingleQuestionContradiction(content, ocrText);
+    hasRawSingleQuestionContradiction(content, ocrText) &&
+    hasParsedContradictionAfterNormalization(result, ocrText);
   const hasMalformedModelContent = isMalformedModelContent(content);
   if (
     estimatedQuestionCount === 1 &&
@@ -1314,7 +1427,8 @@ ${getResponseLanguageInstruction(targetLanguage)}`
             hasUnknownAnswer
           ? 520
           : Math.min(1800, Math.max(500, estimatedQuestionCount * 320)),
-      extra_body: { enable_thinking: false }
+      ...getNoThinkingExtraBody(),
+      response_format: { type: "json_object" }
     }, getRemainingAnalysisTime(analysisDeadline));
     const retryContent = retryResponse?.choices?.[0]?.message?.content || "";
     logRawAIResponse("analysis-retry", retryContent);
@@ -1504,7 +1618,8 @@ ${getResponseLanguageInstruction(targetLanguage)}`
       ],
       temperature: 0,
       max_tokens: Math.min(800, Math.max(320, chunkScopes.length * 220)),
-      extra_body: { enable_thinking: false }
+      ...getNoThinkingExtraBody(),
+      response_format: { type: "json_object" }
     }, Math.min(45000, getRemainingAnalysisTime(analysisDeadline)));
     const content = response?.choices?.[0]?.message?.content || "";
     logRawAIResponse("analysis-scope", content);
@@ -1546,7 +1661,8 @@ ${getResponseLanguageInstruction(targetLanguage)}`
         ],
         temperature: 0,
         max_tokens: Math.min(640, Math.max(360, chunkScopes.length * 260)),
-        extra_body: { enable_thinking: false }
+        ...getNoThinkingExtraBody(),
+        response_format: { type: "json_object" }
       }, Math.min(45000, getRemainingAnalysisTime(analysisDeadline)));
       const retryContent = retryResponse?.choices?.[0]?.message?.content || "";
       logRawAIResponse("analysis-scope-retry", retryContent);
@@ -1755,6 +1871,38 @@ function hasRawSingleQuestionContradiction(content, ocrText) {
   return Boolean(finalLabel && feedbackLabel && finalLabel !== feedbackLabel);
 }
 
+function hasParsedContradictionAfterNormalization(parsedResult, ocrText) {
+  const question = parsedResult.questions?.[0];
+  if (!question) {
+    return false;
+  }
+
+  const evaluation = question.userAnswerEvaluation;
+  if (!evaluation || typeof evaluation !== "object") {
+    return false;
+  }
+
+  const visibleLabels = extractVisibleChoiceLabels(ocrText);
+  if (!visibleLabels.size) {
+    return false;
+  }
+
+  const parsedLabel = extractVisibleLabelFromRaw(
+    question.answerLabel,
+    visibleLabels
+  );
+  if (!parsedLabel) {
+    return false;
+  }
+
+  const feedbackLabel = extractCorrectLabelFromRawFeedback(
+    evaluation,
+    visibleLabels
+  );
+
+  return Boolean(feedbackLabel && parsedLabel !== feedbackLabel);
+}
+
 function parseRawAIJSONObject(content) {
   const source = stripRawThinkingBlocks(content)
     .trim()
@@ -1778,6 +1926,13 @@ function stripRawThinkingBlocks(content) {
     .replace(/<think>[\s\S]*?<\/think>/gi, "")
     .replace(/^\s*<think>[\s\S]*$/i, "")
     .trim();
+}
+
+function getNoThinkingExtraBody() {
+  if (loadedModelId && isThinkingModel(loadedModelId)) {
+    return { extra_body: { enable_thinking: false } };
+  }
+  return {};
 }
 
 function normalizeRawAnswerCount(value) {
@@ -2157,4 +2312,194 @@ async function cropSubImage(imageDataUrl, bbox) {
     img.onerror = () => reject(new Error("Failed to load image for sub-cropping"));
     img.src = imageDataUrl;
   });
+}
+
+async function runOpenAIAnalysis(ocrText, sourceQuality = {}) {
+  const targetLanguage = detectQuestionLanguage(ocrText);
+  const estimatedQuestionCount = estimateQuestionCount(ocrText);
+  
+  const useCompactBatchPrompt = estimatedQuestionCount >= 2;
+  const useFastSinglePrompt = estimatedQuestionCount === 1;
+  const maxTokens = useCompactBatchPrompt ? 1800 : 800;
+  
+  const systemPrompt = targetLanguage === "vi"
+    ? `Bạn là QuizBuddy AI, một gia sư học tập tại địa phương và riêng tư. Trả lời cả câu hỏi trắc nghiệm và câu hỏi tự luận. Xác minh các lựa chọn hiển thị, chỉ ra sự không chắc chắn và chỉ trả về đối tượng JSON hợp lệ.\n\n${getResponseLanguageInstruction(targetLanguage)}`
+    : `You are QuizBuddy AI, a private local learning tutor. Answer both multiple-choice questions and question-only direct-answer prompts. Verify visible choices, expose uncertainty, and return valid JSON only.\n\n${getResponseLanguageInstruction(targetLanguage)}`;
+
+  const userPrompt = useCompactBatchPrompt
+    ? buildCompactRetryPrompt(ocrText, {
+        subject: sourceQuality.subject,
+        forceLanguage: targetLanguage,
+        formulas: sourceQuality.formulas
+      })
+    : useFastSinglePrompt
+      ? buildFastSingleQuestionPrompt(ocrText, {
+          subject: sourceQuality.subject,
+          forceLanguage: targetLanguage,
+          userSelectedAnswer: sourceQuality.userSelectedAnswer,
+          customInstruction: sourceQuality.customInstruction,
+          formulas: sourceQuality.formulas
+        })
+      : buildAnalysisPrompt(ocrText, sourceQuality);
+
+  const messages = [
+    { role: "system", content: systemPrompt },
+    { role: "user", content: userPrompt }
+  ];
+
+  const apiConfig = {
+    openaiBaseUrl: sourceQuality.openaiBaseUrl,
+    openaiApiKey: sourceQuality.openaiApiKey,
+    openaiModel: sourceQuality.openaiModel
+  };
+
+  const response = await callOpenAICompatibleAPI(
+    messages,
+    0.1,
+    maxTokens,
+    { type: "json_object" },
+    apiConfig,
+    activeRequestId
+  );
+
+  const content = response?.choices?.[0]?.message?.content || "";
+  logRawAIResponse("analysis", content);
+  
+  reportProgress("parse", "Checking the AI response...", 0.9);
+  let result = parseAIResult(content, ocrText, {
+    requestedMode: sourceQuality.mode,
+    userSelectedAnswer: sourceQuality.userSelectedAnswer
+  });
+
+  return result;
+}
+
+async function callOpenAICompatibleAPI(messages, temperature, maxTokens, responseFormat, apiConfig, taskId) {
+  const { openaiBaseUrl, openaiApiKey, openaiModel } = apiConfig;
+  const baseUrlClean = String(openaiBaseUrl || "").trim() || "https://api.openai.com/v1";
+  const url = `${baseUrlClean.replace(/\/$/, "")}/chat/completions`;
+  
+  const headers = {
+    "Content-Type": "application/json"
+  };
+  const trimmedKey = String(openaiApiKey || "").trim();
+  if (trimmedKey) {
+    headers["Authorization"] = `Bearer ${trimmedKey}`;
+  }
+  
+  const body = {
+    model: String(openaiModel || "").trim() || "gpt-4o-mini",
+    messages,
+    temperature: temperature !== undefined ? temperature : 0.7,
+    max_tokens: maxTokens,
+    stream: false
+  };
+  
+  if (responseFormat) {
+    body.response_format = responseFormat;
+  }
+  
+  throwIfCancelled(taskId);
+  
+  const response = await fetch(url, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body)
+  });
+  
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => "");
+    throw new Error(`API error (${response.status}): ${errorText || response.statusText}`);
+  }
+  
+  const data = await response.json();
+  throwIfCancelled(taskId);
+  return data;
+}
+
+async function* callOpenAICompatibleAPIStream(messages, temperature, maxTokens, responseFormat, apiConfig, taskId) {
+  const { openaiBaseUrl, openaiApiKey, openaiModel } = apiConfig;
+  const baseUrlClean = String(openaiBaseUrl || "").trim() || "https://api.openai.com/v1";
+  const url = `${baseUrlClean.replace(/\/$/, "")}/chat/completions`;
+  
+  const headers = {
+    "Content-Type": "application/json"
+  };
+  const trimmedKey = String(openaiApiKey || "").trim();
+  if (trimmedKey) {
+    headers["Authorization"] = `Bearer ${trimmedKey}`;
+  }
+  
+  const body = {
+    model: String(openaiModel || "").trim() || "gpt-4o-mini",
+    messages,
+    temperature: temperature !== undefined ? temperature : 0.7,
+    max_tokens: maxTokens,
+    stream: true
+  };
+  
+  if (responseFormat) {
+    body.response_format = responseFormat;
+  }
+  
+  throwIfCancelled(taskId);
+  
+  const response = await fetch(url, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(body)
+  });
+  
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => "");
+    throw new Error(`API error (${response.status}): ${errorText || response.statusText}`);
+  }
+  
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+  
+  try {
+    while (true) {
+      throwIfCancelled(taskId);
+      const { done, value } = await reader.read();
+      if (done) break;
+      
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+      
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        if (trimmed.startsWith("data: ")) {
+          const dataStr = trimmed.slice(6).trim();
+          if (dataStr === "[DONE]") {
+            return;
+          }
+          try {
+            const parsed = JSON.parse(dataStr);
+            yield parsed;
+          } catch (e) {
+            // Ignore partial lines parse errors
+          }
+        }
+      }
+    }
+    
+    if (buffer) {
+      const trimmed = buffer.trim();
+      if (trimmed.startsWith("data: ")) {
+        const dataStr = trimmed.slice(6).trim();
+        if (dataStr !== "[DONE]") {
+          try {
+            const parsed = JSON.parse(dataStr);
+            yield parsed;
+          } catch (e) {}
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
 }
