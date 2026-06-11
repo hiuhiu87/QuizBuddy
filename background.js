@@ -362,7 +362,11 @@ async function handleCaptureProcessLocal(message, sender) {
       subject: message.subject,
       userSelectedAnswer: message.userSelectedAnswer,
       customInstruction: message.customInstruction,
-      analyzeAnyway: message.analyzeAnyway
+      analyzeAnyway: message.analyzeAnyway,
+      provider: message.provider,
+      openaiBaseUrl: message.openaiBaseUrl,
+      openaiApiKey: message.openaiApiKey,
+      openaiModel: message.openaiModel
     });
 
     if (!response) {

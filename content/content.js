@@ -59,6 +59,10 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
   let selectedAnalysisMode = DEFAULT_ANALYSIS_MODE;
   let selectedSubject = DEFAULT_SUBJECT_PRESET;
   let selectedTheme = "system";
+  let selectedProvider = "local";
+  let selectedOpenaiBaseUrl = "https://api.openai.com/v1";
+  let selectedOpenaiApiKey = "";
+  let selectedOpenaiModel = "gpt-4o-mini";
   let sessionStudyNotes = [];
   let currentFormulas = [];
   let lastAnalysisContext = null;
@@ -79,6 +83,10 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
   const ANALYSIS_MODE_KEY = "qbAnalysisMode";
   const SUBJECT_PRESET_KEY = "qbSubjectPreset";
   const THEME_KEY = "qbTheme";
+  const PROVIDER_KEY = "qbProvider";
+  const OPENAI_BASE_URL_KEY = "qbOpenAiBaseUrl";
+  const OPENAI_API_KEY_KEY = "qbOpenAiApiKey";
+  const OPENAI_MODEL_KEY = "qbOpenAiModel";
   const systemThemeMedia = window.matchMedia("(prefers-color-scheme: dark)");
   const host = document.createElement("div");
   setProtectedHostStyles(host);
@@ -125,37 +133,68 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
     </div>
     <div class="qb-sidebar-body">
       <section class="qb-model-card">
-        <div class="qb-model-card-title">Local AI Model</div>
-        <label class="qb-field-label" for="qb-model-select">Model</label>
-        <select id="qb-model-select" class="qb-select qb-model-select">
-          ${MODEL_PROFILES.map(
-            (profile) =>
-              `<option value="${profile.id}">${profile.label} - ${profile.familyLabel || "Qwen2.5"} ${profile.parameterLabel}</option>`
-          ).join("")}
-        </select>
-        <div class="qb-model-card-text">
-          Checking local model status...
+        <div class="qb-model-card-title">AI Provider & Model</div>
+        
+        <div class="qb-field-group">
+          <label class="qb-field-label" for="qb-provider-select">Provider</label>
+          <select id="qb-provider-select" class="qb-select qb-provider-select">
+            <option value="local">Local WebGPU (No Internet)</option>
+            <option value="openai">OpenAI Compatible API</option>
+          </select>
         </div>
-        <div class="qb-model-storage-note">
-          Model weights are stored in Chrome Cache Storage under
-          <span class="qb-model-storage-origin"></span>, not in your Downloads folder.
+
+        <div class="qb-local-settings-group">
+          <label class="qb-field-label" for="qb-model-select" style="margin-top: 10px;">Model</label>
+          <select id="qb-model-select" class="qb-select qb-model-select">
+            ${MODEL_PROFILES.map(
+              (profile) =>
+                `<option value="${profile.id}">${profile.label} - ${profile.familyLabel || "Qwen2.5"} ${profile.parameterLabel}</option>`
+            ).join("")}
+          </select>
+          <div class="qb-model-card-text">
+            Checking local model status...
+          </div>
+          <div class="qb-model-storage-note">
+            Model weights are stored in Chrome Cache Storage under
+            <span class="qb-model-storage-origin"></span>, not in your Downloads folder.
+          </div>
+          <div class="qb-model-cache-summary"></div>
+          <details class="qb-diagnostics">
+            <summary>Device Check</summary>
+            <div class="qb-diagnostics-content">Checking device...</div>
+          </details>
+          <div class="qb-model-progress qb-hidden" aria-hidden="true">
+            <div class="qb-model-progress-bar"></div>
+          </div>
+          <div class="qb-model-actions">
+            <button class="qb-model-download-button" type="button">
+              Download Local Model
+            </button>
+            <button class="qb-model-later-button" type="button">Not Now</button>
+            <button class="qb-model-delete-button qb-hidden" type="button">
+              Delete Cache
+            </button>
+          </div>
         </div>
-        <div class="qb-model-cache-summary"></div>
-        <details class="qb-diagnostics">
-          <summary>Device Check</summary>
-          <div class="qb-diagnostics-content">Checking device...</div>
-        </details>
-        <div class="qb-model-progress qb-hidden" aria-hidden="true">
-          <div class="qb-model-progress-bar"></div>
-        </div>
-        <div class="qb-model-actions">
-          <button class="qb-model-download-button" type="button">
-            Download Local Model
-          </button>
-          <button class="qb-model-later-button" type="button">Not Now</button>
-          <button class="qb-model-delete-button qb-hidden" type="button">
-            Delete Cache
-          </button>
+
+        <div class="qb-openai-settings-group qb-hidden">
+          <div class="qb-field-group" style="margin-top: 10px;">
+            <label class="qb-field-label" for="qb-openai-url">API Base URL</label>
+            <input id="qb-openai-url" class="qb-input qb-openai-url" type="text" placeholder="https://api.openai.com/v1" />
+          </div>
+          <div class="qb-field-group" style="margin-top: 10px;">
+            <label class="qb-field-label" for="qb-openai-key">API Key</label>
+            <input id="qb-openai-key" class="qb-input qb-openai-key" type="password" placeholder="sk-..." />
+          </div>
+          <div class="qb-field-group" style="margin-top: 10px;">
+            <label class="qb-field-label" for="qb-openai-model">Model Name</label>
+            <input id="qb-openai-model" class="qb-input qb-openai-model" type="text" placeholder="gpt-4o-mini" />
+          </div>
+          <div class="qb-openai-actions" style="margin-top: 12px; display: flex; gap: 8px;">
+            <button class="qb-openai-save-button" type="button">
+              Save API Settings
+            </button>
+          </div>
         </div>
       </section>
       <section class="qb-settings-row">
@@ -277,7 +316,7 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
           <textarea class="qb-ocr-textarea" rows="8" spellcheck="true"></textarea>
           <div class="qb-ocr-preview qb-hidden"></div>
         </div>
-        <button class="qb-analyze-button" type="button">Analyze Again</button>
+        <button class="qb-analyze-button" type="button">Analyze Question</button>
       </section>
       <section class="qb-section qb-result-section qb-hidden">
         <h2 class="qb-section-title">AI Result</h2>
@@ -331,6 +370,13 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
     ".qb-diagnostics-content"
   );
   const modelSelect = sidebar.querySelector(".qb-model-select");
+  const providerSelect = sidebar.querySelector(".qb-provider-select");
+  const localSettingsGroup = sidebar.querySelector(".qb-local-settings-group");
+  const openaiSettingsGroup = sidebar.querySelector(".qb-openai-settings-group");
+  const openaiUrlInput = sidebar.querySelector(".qb-openai-url");
+  const openaiKeyInput = sidebar.querySelector(".qb-openai-key");
+  const openaiModelInput = sidebar.querySelector(".qb-openai-model");
+  const openaiSaveButton = sidebar.querySelector(".qb-openai-save-button");
   const modelProgress = sidebar.querySelector(".qb-model-progress");
   const modelProgressBar = sidebar.querySelector(".qb-model-progress-bar");
   const modelActions = sidebar.querySelector(".qb-model-actions");
@@ -444,6 +490,8 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
     releaseLocalResources();
   });
   themeButton.addEventListener("click", toggleTheme);
+  providerSelect.addEventListener("change", onProviderChange);
+  openaiSaveButton.addEventListener("click", onOpenaiSaveSettings);
 
   cropButton.addEventListener("click", startCropMode);
   analyzeButton.addEventListener("click", () => analyzeEditedOCRText(false));
@@ -683,6 +731,10 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
           viewportWidth: window.innerWidth,
           viewportHeight: window.innerHeight,
         },
+        provider: selectedProvider,
+        openaiBaseUrl: selectedOpenaiBaseUrl,
+        openaiApiKey: selectedOpenaiApiKey,
+        openaiModel: selectedOpenaiModel
       });
 
       if (activeRequestId !== taskId) return;
@@ -734,6 +786,14 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
     if (response.croppedImageDataUrl) {
       lastScreenshotAvailable = true;
       recropButton.disabled = false;
+    }
+
+    if (response.ok && response.stage === "ocr") {
+      setStatus("OCR complete. Edit the text above if needed, then click Analyze Question.");
+      lastScreenshotAvailable =
+        lastScreenshotAvailable || Boolean(response.croppedImageDataUrl);
+      recropButton.disabled = !lastScreenshotAvailable;
+      return;
     }
 
     if (!response.ok) {
@@ -1204,7 +1264,9 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
     cropButton.disabled = processing || !modelReady;
     cropButton.textContent = processing ? "Processing..." : "Crop Question";
     analyzeButton.disabled = processing || !modelReady;
-    analyzeButton.textContent = processing ? "Analyzing..." : "Analyze Again";
+    analyzeButton.textContent = processing
+      ? "Analyzing..."
+      : (lastAnalysisContext ? "Analyze Again" : "Analyze Question");
     modelSelect.disabled = processing || Boolean(modelRequestId);
     ocrLanguageSelect.disabled = processing;
     subjectSelect.disabled = processing;
@@ -1218,6 +1280,23 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
 
   async function ensureModelOnboarding() {
     await loadPreferences();
+    
+    if (selectedProvider === "openai") {
+      modelReady = true;
+      cropButton.disabled = false;
+      modelCard.classList.add("qb-model-card-ready");
+      modelCardTitle.textContent = "OpenAI Compatible API Ready";
+      modelCardText.textContent = `Using API model: ${selectedOpenaiModel}`;
+      modelProgress.classList.add("qb-hidden");
+      modelActions.classList.add("qb-hidden");
+      localSettingsGroup.classList.add("qb-hidden");
+      openaiSettingsGroup.classList.remove("qb-hidden");
+      return;
+    }
+
+    localSettingsGroup.classList.remove("qb-hidden");
+    openaiSettingsGroup.classList.add("qb-hidden");
+
     if (modelReady || modelRequestId) {
       return;
     }
@@ -1411,7 +1490,11 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
           ANALYSIS_MODE_KEY,
           SUBJECT_PRESET_KEY,
           THEME_KEY,
-          CUSTOM_INSTRUCTIONS_KEY
+          CUSTOM_INSTRUCTIONS_KEY,
+          PROVIDER_KEY,
+          OPENAI_BASE_URL_KEY,
+          OPENAI_API_KEY_KEY,
+          OPENAI_MODEL_KEY
         ])
         .then((storage) => {
           selectedModelId = getModelProfile(
@@ -1432,18 +1515,85 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
           customInstructions = normalizeCustomInstructions(
             storage[CUSTOM_INSTRUCTIONS_KEY]
           );
+          
+          selectedProvider = storage[PROVIDER_KEY] || "local";
+          selectedOpenaiBaseUrl = storage[OPENAI_BASE_URL_KEY] || "https://api.openai.com/v1";
+          selectedOpenaiApiKey = storage[OPENAI_API_KEY_KEY] || "";
+          selectedOpenaiModel = storage[OPENAI_MODEL_KEY] || "gpt-4o-mini";
+          
           modelSelect.value = selectedModelId;
           ocrLanguageSelect.value = selectedOcrLanguage;
           subjectSelect.value = selectedSubject;
+          
+          providerSelect.value = selectedProvider;
+          openaiUrlInput.value = selectedOpenaiBaseUrl;
+          openaiKeyInput.value = selectedOpenaiApiKey;
+          openaiModelInput.value = selectedOpenaiModel;
+          
           applyAnalysisMode();
           applyTheme();
           applyFloatingButtonDockState();
           customEnabled.checked = customInstructions.enabled;
           loadCustomInstructionEditor();
+          applyProvider();
         });
     }
 
     return preferencesLoadedPromise;
+  }
+
+  function applyProvider() {
+    const isLocal = selectedProvider === "local";
+    localSettingsGroup.classList.toggle("qb-hidden", !isLocal);
+    openaiSettingsGroup.classList.toggle("qb-hidden", isLocal);
+
+    const subtitle = sidebar.querySelector(".qb-subtitle");
+    if (subtitle) {
+      subtitle.textContent = isLocal ? "Local question analysis" : "API question analysis";
+    }
+
+    if (isLocal) {
+      modelCard.classList.remove("qb-model-card-ready");
+      modelReady = false;
+      modelStatusChecked = false;
+      selectedModelCached = false;
+      cropButton.disabled = true;
+      ensureModelOnboarding();
+    } else {
+      modelReady = true;
+      cropButton.disabled = false;
+      modelCard.classList.add("qb-model-card-ready");
+      modelCardTitle.textContent = "OpenAI Compatible API Ready";
+      modelCardText.textContent = `Using API model: ${selectedOpenaiModel}`;
+      modelProgress.classList.add("qb-hidden");
+      modelActions.classList.add("qb-hidden");
+      setStatus("Ready to crop a question.");
+    }
+  }
+
+  async function onProviderChange() {
+    selectedProvider = providerSelect.value;
+    await chrome.storage.local.set({
+      [PROVIDER_KEY]: selectedProvider
+    });
+    applyProvider();
+  }
+
+  async function onOpenaiSaveSettings() {
+    selectedOpenaiBaseUrl = openaiUrlInput.value.trim() || "https://api.openai.com/v1";
+    selectedOpenaiApiKey = openaiKeyInput.value.trim();
+    selectedOpenaiModel = openaiModelInput.value.trim() || "gpt-4o-mini";
+
+    await chrome.storage.local.set({
+      [OPENAI_BASE_URL_KEY]: selectedOpenaiBaseUrl,
+      [OPENAI_API_KEY_KEY]: selectedOpenaiApiKey,
+      [OPENAI_MODEL_KEY]: selectedOpenaiModel
+    });
+
+    if (selectedProvider === "openai") {
+      modelCardText.textContent = `Using API model: ${selectedOpenaiModel}`;
+    }
+    setStatus("API settings saved.");
   }
 
   async function onModelSelectionChange() {
@@ -1725,7 +1875,11 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
         analyzeAnyway,
         customInstruction: getActiveCustomInstruction(),
         formulas: currentFormulas,
-        hasFormulas: currentFormulas.length > 0
+        hasFormulas: currentFormulas.length > 0,
+        provider: selectedProvider,
+        openaiBaseUrl: selectedOpenaiBaseUrl,
+        openaiApiKey: selectedOpenaiApiKey,
+        openaiModel: selectedOpenaiModel
       });
       if (activeRequestId !== taskId) return;
       handleProcessingResponse(response);
@@ -1804,7 +1958,11 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
           mode: lastAnalysisContext.mode,
           questionQuality: lastAnalysisContext.questionQuality
         },
-        customInstruction: getActiveCustomInstruction()
+        customInstruction: getActiveCustomInstruction(),
+        provider: selectedProvider,
+        openaiBaseUrl: selectedOpenaiBaseUrl,
+        openaiApiKey: selectedOpenaiApiKey,
+        openaiModel: selectedOpenaiModel
       });
       if (activeRequestId !== taskId) return;
       if (!response?.ok) {
@@ -1935,7 +2093,11 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
         subject: selectedSubject,
         mode: selectedAnalysisMode,
         ocrText: getScopedQuestionText(selectedQuestion),
-        aiResult: selectedQuestion
+        aiResult: selectedQuestion,
+        provider: selectedProvider,
+        openaiBaseUrl: selectedOpenaiBaseUrl,
+        openaiApiKey: selectedOpenaiApiKey,
+        openaiModel: selectedOpenaiModel
       });
       if (activeRequestId !== taskId) return;
       if (!response?.ok) {

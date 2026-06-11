@@ -214,7 +214,7 @@ test("new learning controls stay local and task-scoped", async () => {
   assert.match(offscreen, /buildFollowUpPrompt/);
   assert.match(offscreen, /stream:\s*true/);
   assert.match(offscreen, /max_tokens:\s*320/);
-  assert.match(offscreen, /enable_thinking:\s*false/);
+  assert.match(offscreen, /getNoThinkingExtraBody/);
   assert.match(
     offscreen,
     /const stream = await engine\.chat\.completions\.create\(\{[\s\S]*?stream:\s*true/
