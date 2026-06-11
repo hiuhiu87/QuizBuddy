@@ -26,9 +26,11 @@
     "version:sync": "node scripts/sync-version.mjs"
   },
   "dependencies": {
+    "@huggingface/transformers": "^4.2.0",
     "@mlc-ai/web-llm": "0.2.79",
     "@tesseract.js-data/eng": "1.0.0",
     "@tesseract.js-data/vie": "1.0.0",
+    "katex": "^0.17.0",
     "tesseract.js": "6.0.1"
   },
   "devDependencies": {

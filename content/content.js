@@ -28,6 +28,10 @@ import {
   updateCustomInstruction
 } from "../lib/custom-instructions.js";
 import { numberOcrLines } from "../lib/source-trace.js";
+import katexFontsCSS from "./katex-fonts-base64.css";
+import katexStyles from "katex/dist/katex.min.css";
+import { containsLatexMarkers, renderTextWithFormulas } from "../lib/formula-render.js";
+import { expandFormulasForPrompt } from "../lib/formula-detection.js";
 
 (() => {
   const injectionFlag = Symbol.for("qb.content.injected");
@@ -56,6 +60,7 @@ import { numberOcrLines } from "../lib/source-trace.js";
   let selectedSubject = DEFAULT_SUBJECT_PRESET;
   let selectedTheme = "system";
   let sessionStudyNotes = [];
+  let currentFormulas = [];
   let lastAnalysisContext = null;
   let lastScreenshotAvailable = false;
   let floatingButtonDocked = false;
@@ -81,8 +86,16 @@ import { numberOcrLines } from "../lib/source-trace.js";
 
   const shadowRoot = host.attachShadow({ mode: "closed" });
   const style = document.createElement("style");
-  style.textContent = extensionStyles;
+  style.textContent = extensionStyles + "\n" + katexStyles;
   shadowRoot.append(style);
+
+  // Inject KaTeX base64 fonts into document head so it is visible to shadow DOM
+  if (!document.getElementById("qb-katex-fonts")) {
+    const fontStyle = document.createElement("style");
+    fontStyle.id = "qb-katex-fonts";
+    fontStyle.textContent = katexFontsCSS;
+    document.head.appendChild(fontStyle);
+  }
 
   const floatingButton = createElement("button", "qb-floating-button");
   floatingButton.type = "button";
@@ -117,7 +130,7 @@ import { numberOcrLines } from "../lib/source-trace.js";
         <select id="qb-model-select" class="qb-select qb-model-select">
           ${MODEL_PROFILES.map(
             (profile) =>
-              `<option value="${profile.id}">${profile.label} - Qwen2.5 ${profile.parameterLabel}</option>`
+              `<option value="${profile.id}">${profile.label} - ${profile.familyLabel || "Qwen2.5"} ${profile.parameterLabel}</option>`
           ).join("")}
         </select>
         <div class="qb-model-card-text">
@@ -252,9 +265,18 @@ import { numberOcrLines } from "../lib/source-trace.js";
         </button>
       </section>
       <section class="qb-section qb-ocr-section qb-hidden">
-        <h2 class="qb-section-title">OCR Text</h2>
+        <div class="qb-ocr-header">
+          <h2 class="qb-section-title">OCR Text</h2>
+          <div class="qb-ocr-tabs">
+            <button type="button" class="qb-ocr-tab active" data-tab="edit">Edit</button>
+            <button type="button" class="qb-ocr-tab" data-tab="preview">Preview</button>
+          </div>
+        </div>
         <div class="qb-ocr-confidence"></div>
-        <textarea class="qb-ocr-textarea" rows="8" spellcheck="true"></textarea>
+        <div class="qb-ocr-container">
+          <textarea class="qb-ocr-textarea" rows="8" spellcheck="true"></textarea>
+          <div class="qb-ocr-preview qb-hidden"></div>
+        </div>
         <button class="qb-analyze-button" type="button">Analyze Again</button>
       </section>
       <section class="qb-section qb-result-section qb-hidden">
@@ -332,6 +354,8 @@ import { numberOcrLines } from "../lib/source-trace.js";
   const ocrSection = sidebar.querySelector(".qb-ocr-section");
   const ocrConfidence = sidebar.querySelector(".qb-ocr-confidence");
   const ocrTextarea = sidebar.querySelector(".qb-ocr-textarea");
+  const ocrPreview = sidebar.querySelector(".qb-ocr-preview");
+  const ocrTabs = [...sidebar.querySelectorAll(".qb-ocr-tab")];
   const analyzeButton = sidebar.querySelector(".qb-analyze-button");
   const resultSection = sidebar.querySelector(".qb-result-section");
   const resultCard = sidebar.querySelector(".qb-result-card");
@@ -359,6 +383,36 @@ import { numberOcrLines } from "../lib/source-trace.js";
   const followupInput = sidebar.querySelector(".qb-followup-input");
   const followupSend = sidebar.querySelector(".qb-followup-send");
   const followupChips = [...sidebar.querySelectorAll(".qb-followup-chip")];
+
+  ocrTabs.forEach((tab) => {
+    tab.addEventListener("click", () => {
+      ocrTabs.forEach((t) => t.classList.remove("active"));
+      tab.classList.add("active");
+      
+      const mode = tab.dataset.tab;
+      if (mode === "preview") {
+        ocrTextarea.classList.add("qb-hidden");
+        ocrPreview.classList.remove("qb-hidden");
+        
+        const rawContent = ocrTextarea.value.trim();
+        const content = expandFormulasForPrompt(rawContent, currentFormulas);
+        ocrPreview.replaceChildren();
+        if (containsLatexMarkers(content)) {
+          ocrPreview.appendChild(renderTextWithFormulas(content));
+          // Apply entering class to any formula nodes inside the preview for fade-in effect
+          ocrPreview.querySelectorAll(".qb-formula").forEach((el) => {
+            el.classList.add("qb-formula-entering");
+          });
+        } else {
+          ocrPreview.textContent = rawContent || "No text available";
+        }
+      } else {
+        ocrPreview.classList.add("qb-hidden");
+        ocrTextarea.classList.remove("qb-hidden");
+        ocrTextarea.focus();
+      }
+    });
+  });
 
   applyTheme();
   cropButton.disabled = true;
@@ -497,6 +551,15 @@ import { numberOcrLines } from "../lib/source-trace.js";
     ) {
       renderPartialResult(message);
     }
+
+    if (
+      message.type === "QB_PROCESS_RAW_AI" &&
+      (message.taskId || message.requestId) === activeRequestId
+    ) {
+      console.info(
+        `[QuizBuddy raw AI] ${message.label} (${message.rawLength} chars)\n${message.content}${message.truncated ? `\n...[truncated ${message.truncated} chars]` : ""}`
+      );
+    }
   });
 
   async function startCropFromShortcut() {
@@ -612,7 +675,7 @@ import { numberOcrLines } from "../lib/source-trace.js";
         ocrLanguage: selectedOcrLanguage,
         mode: selectedAnalysisMode,
         subject: selectedSubject,
-        userSelectedAnswer: getUserSelectedAnswer(),
+        userSelectedAnswer: "",
         customInstruction: getActiveCustomInstruction(),
         rect: {
           ...rect,
@@ -725,6 +788,10 @@ import { numberOcrLines } from "../lib/source-trace.js";
   }
 
   function renderPartialResult(result) {
+    if (result.formulas) {
+      currentFormulas = result.formulas;
+    }
+
     if (result.croppedImageDataUrl) {
       previewImage.src = result.croppedImageDataUrl;
       previewSection.classList.remove("qb-hidden");
@@ -733,6 +800,11 @@ import { numberOcrLines } from "../lib/source-trace.js";
     if (result.ocrText) {
       ocrTextarea.value = result.ocrText;
       ocrSection.classList.remove("qb-hidden");
+      
+      // Reset OCR tab to Edit
+      ocrTabs.forEach((t) => t.classList.toggle("active", t.dataset.tab === "edit"));
+      ocrPreview.classList.add("qb-hidden");
+      ocrTextarea.classList.remove("qb-hidden");
     }
 
     if (Number.isFinite(result.ocrConfidence)) {
@@ -752,7 +824,11 @@ import { numberOcrLines } from "../lib/source-trace.js";
     }
 
     if (result.followupText && followupStreamingBubble) {
-      followupStreamingBubble.textContent = result.followupText;
+      if (containsLatexMarkers(result.followupText)) {
+        followupStreamingBubble.replaceChildren(renderTextWithFormulas(result.followupText));
+      } else {
+        followupStreamingBubble.textContent = result.followupText;
+      }
       followupStreamingBubble.classList.remove("qb-followup-pending");
     }
   }
@@ -820,13 +896,13 @@ import { numberOcrLines } from "../lib/source-trace.js";
       );
       container.append(heading);
       if (result.questionText) {
-        container.append(
-          createElement(
-            "div",
-            "qb-question-text",
-            result.questionText
-          )
-        );
+        const qTextElement = createElement("div", "qb-question-text");
+        if (containsLatexMarkers(result.questionText)) {
+          qTextElement.appendChild(renderTextWithFormulas(result.questionText));
+        } else {
+          qTextElement.textContent = result.questionText;
+        }
+        container.append(qTextElement);
       }
     }
 
@@ -988,14 +1064,24 @@ import { numberOcrLines } from "../lib/source-trace.js";
           option.isCorrect ? "qb-option-correct" : "qb-option-wrong"
         }`
       );
-      const title = createElement(
-        "div",
-        "qb-option-title",
-        `${option.isCorrect ? "Correct" : "Not selected"}: ${
-          option.label ? `${option.label}. ` : ""
-        }${option.text}`
-      );
-      item.append(title, createElement("div", "qb-option-reason", option.reason));
+      const titleText = `${option.isCorrect ? "Correct" : "Not selected"}: ${
+        option.label ? `${option.label}. ` : ""
+      }${option.text}`;
+      const title = createElement("div", "qb-option-title");
+      if (containsLatexMarkers(titleText)) {
+        title.appendChild(renderTextWithFormulas(titleText));
+      } else {
+        title.textContent = titleText;
+      }
+
+      const reason = createElement("div", "qb-option-reason");
+      if (option.reason && containsLatexMarkers(option.reason)) {
+        reason.appendChild(renderTextWithFormulas(option.reason));
+      } else {
+        reason.textContent = option.reason || "";
+      }
+
+      item.append(title, reason);
       list.append(item);
     });
     details.append(summary, list);
@@ -1055,15 +1141,20 @@ import { numberOcrLines } from "../lib/source-trace.js";
     const labelElement = createElement("div", "qb-result-label", label);
     const valueElement = createElement(
       "div",
-      `qb-result-value ${valueClass}`.trim(),
-      value || "Not provided"
+      `qb-result-value ${valueClass}`.trim()
     );
+    if (value && containsLatexMarkers(value)) {
+      valueElement.appendChild(renderTextWithFormulas(value));
+    } else {
+      valueElement.textContent = value || "Not provided";
+    }
     item.append(labelElement, valueElement);
     return item;
   }
 
   function resetOutput() {
     clearError();
+    clearUserAnswerCheck();
     previewImage.removeAttribute("src");
     ocrTextarea.value = "";
     ocrConfidence.textContent = "";
@@ -1076,8 +1167,15 @@ import { numberOcrLines } from "../lib/source-trace.js";
     qualityCard.classList.add("qb-hidden");
     pendingQuestionQuality = null;
     lastAnalysisContext = null;
+    currentFormulas = [];
     previewSection.classList.add("qb-hidden");
     ocrSection.classList.add("qb-hidden");
+    
+    // Reset OCR tabs to Edit
+    ocrTabs.forEach((t) => t.classList.toggle("active", t.dataset.tab === "edit"));
+    ocrPreview.classList.add("qb-hidden");
+    ocrTextarea.classList.remove("qb-hidden");
+    
     resultSection.classList.add("qb-hidden");
     practiceSection.classList.add("qb-hidden");
   }
@@ -1625,7 +1723,9 @@ import { numberOcrLines } from "../lib/source-trace.js";
         userSelectedAnswer: getUserSelectedAnswer(),
         questionQuality: pendingQuestionQuality,
         analyzeAnyway,
-        customInstruction: getActiveCustomInstruction()
+        customInstruction: getActiveCustomInstruction(),
+        formulas: currentFormulas,
+        hasFormulas: currentFormulas.length > 0
       });
       if (activeRequestId !== taskId) return;
       handleProcessingResponse(response);
@@ -2100,7 +2200,7 @@ import { numberOcrLines } from "../lib/source-trace.js";
         ocrLanguage: selectedOcrLanguage,
         mode: selectedAnalysisMode,
         subject: selectedSubject,
-        userSelectedAnswer: getUserSelectedAnswer(),
+        userSelectedAnswer: "",
         customInstruction: getActiveCustomInstruction(),
         rect
       });
@@ -2178,6 +2278,12 @@ import { numberOcrLines } from "../lib/source-trace.js";
     return checkAnswerCheckbox.checked
       ? userAnswerInput.value.trim()
       : "";
+  }
+
+  function clearUserAnswerCheck() {
+    checkAnswerCheckbox.checked = false;
+    userAnswerInput.value = "";
+    userAnswerInput.classList.add("qb-hidden");
   }
 
   function waitForBrowserPaint() {

@@ -92,3 +92,26 @@ test("wrong multiple-select answer count forces low reliability", () => {
   assert.equal(result.level, "low");
   assert.ok(result.reasons.some((reason) => /requires 3 answers/.test(reason)));
 });
+
+test("low Math OCR formula confidence downgrades reliability", () => {
+  const result = calculateOverallReliability({
+    ocrConfidence: 95,
+    aiConfidence: "high",
+    parseStatus: "parsed",
+    formulas: [{ confidence: 50 }]
+  });
+
+  assert.equal(result.level, "low");
+  assert.ok(result.reasons.some((reason) => /Low math formula OCR confidence/.test(reason)));
+});
+
+test("high Math OCR formula confidence permits high reliability", () => {
+  const result = calculateOverallReliability({
+    ocrConfidence: 90,
+    aiConfidence: "high",
+    parseStatus: "parsed",
+    formulas: [{ confidence: 95 }]
+  });
+
+  assert.equal(result.level, "high");
+});
