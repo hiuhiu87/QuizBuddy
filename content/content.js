@@ -58,6 +58,7 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
   let selectedOcrLanguage = DEFAULT_OCR_LANGUAGE;
   let selectedAnalysisMode = DEFAULT_ANALYSIS_MODE;
   let selectedSubject = DEFAULT_SUBJECT_PRESET;
+  let selectedAnalysisInputMode = "ocr";
   let selectedTheme = "system";
   let selectedProvider = "local";
   let selectedOpenaiBaseUrl = "https://api.openai.com/v1";
@@ -82,6 +83,7 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
   const FLOATING_BUTTON_DOCKED_KEY = "qbFloatingButtonDocked";
   const ANALYSIS_MODE_KEY = "qbAnalysisMode";
   const SUBJECT_PRESET_KEY = "qbSubjectPreset";
+  const ANALYSIS_INPUT_MODE_KEY = "qbAnalysisInputMode";
   const THEME_KEY = "qbTheme";
   const PROVIDER_KEY = "qbProvider";
   const OPENAI_BASE_URL_KEY = "qbOpenAiBaseUrl";
@@ -231,6 +233,13 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
                   `<button type="button" class="qb-mode-button" data-mode="${option.id}">${option.label}</button>`
               ).join("")}
             </div>
+          </div>
+          <div class="qb-field-group qb-field-group-wide qb-image-input-option">
+            <label class="qb-check-answer-toggle">
+              <input class="qb-image-input-checkbox" type="checkbox" />
+              <span>Send cropped image directly to API and skip OCR text</span>
+            </label>
+            <div class="qb-image-input-note">Requires an OpenAI-compatible vision model.</div>
           </div>
         </div>
         <div class="qb-answer-check">
@@ -391,6 +400,8 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
   const checkAnswerCheckbox = sidebar.querySelector(
     ".qb-check-answer-checkbox"
   );
+  const imageInputCheckbox = sidebar.querySelector(".qb-image-input-checkbox");
+  const imageInputNote = sidebar.querySelector(".qb-image-input-note");
   const userAnswerInput = sidebar.querySelector(".qb-user-answer-input");
   const cropButton = sidebar.querySelector(".qb-crop-button");
   const status = sidebar.querySelector(".qb-status");
@@ -502,6 +513,7 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
   modelDeleteButton.addEventListener("click", deleteSelectedModel);
   modelSelect.addEventListener("change", onModelSelectionChange);
   ocrLanguageSelect.addEventListener("change", onOCRLanguageChange);
+  imageInputCheckbox.addEventListener("change", onAnalysisInputModeChange);
   subjectSelect.addEventListener("change", onSubjectChange);
   modeButtons.forEach((button) =>
     button.addEventListener("click", () => setAnalysisMode(button.dataset.mode))
@@ -573,7 +585,7 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
     if (message.type === "QB_CAPTURE_FINISHED") {
       setCaptureVisibility(false);
       setStatus(
-        "Processing locally. The first run may take longer because the model needs to initialize.",
+        "Processing the crop. The first run may take longer while the model or API responds.",
         true
       );
     }
@@ -725,6 +737,7 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
         subject: selectedSubject,
         userSelectedAnswer: "",
         customInstruction: getActiveCustomInstruction(),
+        analysisInputMode: getActiveAnalysisInputMode(),
         rect: {
           ...rect,
           devicePixelRatio: window.devicePixelRatio || 1,
@@ -819,11 +832,16 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
     }
 
     renderAIResult(response.aiResult);
+    const sourceText =
+      response.ocrText ||
+      ocrTextarea.value ||
+      response.aiResult?.questionText ||
+      "";
     lastAnalysisContext = {
-      ocrText: response.ocrText || ocrTextarea.value,
+      ocrText: sourceText,
       analysisResult: response.aiResult,
       aiResult: response.aiResult,
-      numberedLines: numberOcrLines(response.ocrText || ocrTextarea.value),
+      numberedLines: numberOcrLines(sourceText),
       questionQuality: response.questionQuality,
       subject: selectedSubject,
       mode: selectedAnalysisMode
@@ -918,7 +936,7 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
           "qb-batch-summary-meta",
           result.batchIncomplete
             ? "Review the OCR split or analyze again."
-            : `${getModelProfile(selectedModelId).label} · ${getSubjectPreset(selectedSubject).label}`
+            : `${getActiveModelLabel()} · ${getSubjectPreset(selectedSubject).label}`
         )
       );
       summary.classList.toggle(
@@ -996,8 +1014,8 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
         ? [
             createResultItem("AI Confidence", result.confidence),
             createResultItem(
-              "Local Model",
-              getModelProfile(selectedModelId).label
+              "AI Provider",
+              getActiveModelLabel()
             ),
             createResultItem(
               "Subject",
@@ -1268,7 +1286,9 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
       ? "Analyzing..."
       : (lastAnalysisContext ? "Analyze Again" : "Analyze Question");
     modelSelect.disabled = processing || Boolean(modelRequestId);
-    ocrLanguageSelect.disabled = processing;
+    ocrLanguageSelect.disabled =
+      processing || getActiveAnalysisInputMode() === "image";
+    imageInputCheckbox.disabled = processing || selectedProvider !== "openai";
     subjectSelect.disabled = processing;
     modeButtons.forEach((button) => {
       button.disabled = processing;
@@ -1489,6 +1509,7 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
           FLOATING_BUTTON_DOCKED_KEY,
           ANALYSIS_MODE_KEY,
           SUBJECT_PRESET_KEY,
+          ANALYSIS_INPUT_MODE_KEY,
           THEME_KEY,
           CUSTOM_INSTRUCTIONS_KEY,
           PROVIDER_KEY,
@@ -1509,6 +1530,9 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
           selectedSubject = normalizeSubjectPreset(
             storage[SUBJECT_PRESET_KEY]
           );
+          selectedAnalysisInputMode = normalizeAnalysisInputMode(
+            storage[ANALYSIS_INPUT_MODE_KEY]
+          );
           selectedTheme = normalizeTheme(storage[THEME_KEY]);
           floatingButtonDocked =
             storage[FLOATING_BUTTON_DOCKED_KEY] === true;
@@ -1524,6 +1548,7 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
           modelSelect.value = selectedModelId;
           ocrLanguageSelect.value = selectedOcrLanguage;
           subjectSelect.value = selectedSubject;
+          imageInputCheckbox.checked = selectedAnalysisInputMode === "image";
           
           providerSelect.value = selectedProvider;
           openaiUrlInput.value = selectedOpenaiBaseUrl;
@@ -1531,6 +1556,7 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
           openaiModelInput.value = selectedOpenaiModel;
           
           applyAnalysisMode();
+          applyAnalysisInputMode();
           applyTheme();
           applyFloatingButtonDockState();
           customEnabled.checked = customInstructions.enabled;
@@ -1569,6 +1595,7 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
       modelActions.classList.add("qb-hidden");
       setStatus("Ready to crop a question.");
     }
+    applyAnalysisInputMode();
   }
 
   async function onProviderChange() {
@@ -1613,6 +1640,14 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
     selectedOcrLanguage = normalizeOCRLanguage(ocrLanguageSelect.value);
     await chrome.storage.local.set({
       [OCR_LANGUAGE_KEY]: selectedOcrLanguage
+    });
+  }
+
+  async function onAnalysisInputModeChange() {
+    selectedAnalysisInputMode = imageInputCheckbox.checked ? "image" : "ocr";
+    applyAnalysisInputMode();
+    await chrome.storage.local.set({
+      [ANALYSIS_INPUT_MODE_KEY]: selectedAnalysisInputMode
     });
   }
 
@@ -1674,6 +1709,35 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
       button.classList.toggle("qb-mode-button-active", selected);
       button.setAttribute("aria-pressed", String(selected));
     });
+  }
+
+  function normalizeAnalysisInputMode(value) {
+    return value === "image" ? "image" : "ocr";
+  }
+
+  function getActiveAnalysisInputMode() {
+    return selectedProvider === "openai" &&
+      selectedAnalysisInputMode === "image"
+      ? "image"
+      : "ocr";
+  }
+
+  function getActiveModelLabel() {
+    return selectedProvider === "openai"
+      ? `API: ${selectedOpenaiModel || "OpenAI Compatible"}`
+      : `Local: ${getModelProfile(selectedModelId).label}`;
+  }
+
+  function applyAnalysisInputMode() {
+    const canUseImageInput = selectedProvider === "openai";
+    imageInputCheckbox.checked = getActiveAnalysisInputMode() === "image";
+    imageInputCheckbox.disabled =
+      !canUseImageInput || Boolean(activeRequestId);
+    imageInputNote.textContent = canUseImageInput
+      ? "Requires an OpenAI-compatible vision model."
+      : "Switch Provider to OpenAI Compatible API to use image input.";
+    ocrLanguageSelect.disabled =
+      Boolean(activeRequestId) || getActiveAnalysisInputMode() === "image";
   }
 
   async function toggleTheme() {
@@ -2351,7 +2415,7 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
     cancelScheduledResourceRelease();
     resetOutput();
     setProcessingState(true);
-    setStatus("Processing the new crop locally...", true);
+    setStatus("Processing the new crop...", true);
 
     try {
       const response = await chrome.runtime.sendMessage({
@@ -2364,7 +2428,12 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
         subject: selectedSubject,
         userSelectedAnswer: "",
         customInstruction: getActiveCustomInstruction(),
-        rect
+        analysisInputMode: getActiveAnalysisInputMode(),
+        rect,
+        provider: selectedProvider,
+        openaiBaseUrl: selectedOpenaiBaseUrl,
+        openaiApiKey: selectedOpenaiApiKey,
+        openaiModel: selectedOpenaiModel
       });
       if (activeRequestId !== taskId) return;
       handleProcessingResponse(response);

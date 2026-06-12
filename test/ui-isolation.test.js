@@ -122,6 +122,22 @@ test("user answer check is scoped to analyze-again, not new OCR crops", async ()
   assert.match(source, /clearUserAnswerCheck\(\);/);
 });
 
+test("direct image input is API-only and falls back to OCR for local provider", async () => {
+  const content = await readFile("content/content.js", "utf8");
+  const background = await readFile("background.js", "utf8");
+  const offscreen = await readFile("offscreen.js", "utf8");
+
+  assert.match(content, /qb-image-input-checkbox/);
+  assert.match(content, /selectedProvider === "openai" &&[\s\S]*selectedAnalysisInputMode === "image"/);
+  assert.match(content, /imageInputCheckbox\.disabled =[\s\S]*selectedProvider !== "openai"/);
+  assert.match(content, /analysisInputMode: getActiveAnalysisInputMode\(\)/);
+  assert.match(background, /analysisInputMode: message\.analysisInputMode/);
+  assert.match(offscreen, /analysisInputMode === "image"/);
+  assert.match(offscreen, /provider !== "openai"/);
+  assert.match(offscreen, /runOpenAIImageAnalysis/);
+  assert.match(offscreen, /trustModelSelections: true/);
+});
+
 test("content releases local resources after use and when the page closes", async () => {
   const source = await readFile("content/content.js", "utf8");
 
