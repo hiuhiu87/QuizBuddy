@@ -1,30 +1,39 @@
 # QuizBuddy AI
 
-Privacy-first Chrome extension for answering cropped questions with local OCR
-and browser-based WebLLM inference.
+Privacy-first Chrome extension for answering cropped questions with local OCR,
+browser-based WebLLM inference, or an optional OpenAI-compatible API provider.
 
 QuizBuddy AI captures a user-selected region of the visible tab, extracts
-Vietnamese or English text with Tesseract.js, and uses a selected local Qwen2.5 model to
-produce an answer and learning explanation. It uses no backend, API key, or
-external AI inference API.
+Vietnamese or English text with Tesseract.js, and can use a selected local
+Qwen model to produce an answer and learning explanation. Users can also opt
+into an OpenAI-compatible API provider. In API mode, QuizBuddy can either send
+OCR text or send the cropped image directly to a vision-capable API model. The
+project operates without its own backend, account system, analytics, or
+server-side history.
 
 ## Status
 
-QuizBuddy AI is an MVP under active development. The core crop, OCR, local
-model setup, and result-rendering flows are implemented.
+QuizBuddy AI is an MVP under active development. The crop, OCR, local model,
+optional API provider, image-direct API analysis, result rendering, follow-up,
+practice, and reliability flows are implemented.
 
 ## Highlights
 
 - Chrome Extension Manifest V3
 - Vanilla JavaScript, HTML, and CSS
 - Crop-first visible-tab screenshot workflow
+- Local WebGPU provider for offline inference after model setup
+- Optional OpenAI-compatible API provider
+- API-only direct cropped-image analysis for vision-capable models
 - Browser-local Vietnamese and English OCR
 - Local Math & Formula OCR (via ONNX runtime and transformers.js) to recognize complex equations
 - Safe, isolated LaTeX math rendering inside Shadow DOM using KaTeX with inline base64 fonts
 - Selectable OCR language and editable OCR text
 - Multi-question crop analysis with independent answers and per-question evidence
 - Quick Answer and Learning modes
-- Subject-aware prompts for English, German, Math, general knowledge, and law
+- Subject-aware prompts for English, German, Math, law, science, history,
+  geography, computer science, economics/business, language learning, and
+  general knowledge
 - Optional Check My Answer feedback
 - OCR, AI, and overall reliability indicators with visible reasons
 - OCR line numbering and answer source traces
@@ -33,7 +42,7 @@ model setup, and result-rendering flows are implemented.
 - Locally stored global or subject-specific custom instructions
 - Session-only follow-up chat grounded in the current question
 - Per-option analysis and compact learning examples
-- Local similar-practice generation with answer reveal
+- Similar-practice generation with answer reveal
 - Session-only concept notes
 - True re-crop from the last in-memory screenshot
 - Private WebGPU and model-fit diagnostics
@@ -41,18 +50,22 @@ model setup, and result-rendering flows are implemented.
 - Explicit consent before downloading model weights
 - Fast 0.5B, Balanced 1.5B, Accurate 3B, High Accuracy 7B, and Max Accuracy 8B local model profiles
 - Model cache status, retry, switching, and deletion controls
+- API base URL, key, and model-name controls for compatible providers
 - `Alt+Shift+Q` crop shortcut
 - Full answer text instead of invented A/B/C/D labels
 - Closed Shadow DOM UI isolation
-- No backend, account, API key, analytics, or history
+- No QuizBuddy backend, account, analytics, or persistent study history
 
 ## Requirements
 
 - Node.js 20 or newer
 - npm 10 or newer
 - Chrome or Edge 116 or newer
-- WebGPU and browser hardware acceleration
-- Approximately 945 MB to 5.7 GB of available GPU memory, depending on model
+- For Local WebGPU mode: WebGPU, browser hardware acceleration, and
+  approximately 945 MB to 5.7 GB of available GPU memory depending on model
+- For API mode: an OpenAI-compatible chat completions endpoint and model. The
+  direct-image option requires a vision-capable model that accepts `image_url`
+  message content.
 
 ## Quick Start
 
@@ -75,13 +88,21 @@ The repository root is source code. Always load `dist/` in Chrome.
 
 1. Open a regular `http://` or `https://` page containing a question.
 2. Click the QuizBuddy AI toolbar icon or floating icon.
-3. Select the Fast or Balanced local model.
-4. Review the local model notice and click the download button yourself.
-5. Wait for model setup to complete.
+3. Choose a provider:
+   - **Local WebGPU (No Internet)** for browser-local inference after model
+     download.
+   - **OpenAI Compatible API** for a configured API base URL, API key, and model
+     name.
+4. For Local WebGPU, select a local model, review the model notice, and click
+   the download/load button yourself. Wait for model setup to complete.
+5. For API mode, save the API settings. If the API model supports vision, you
+   can enable **Send cropped image directly to API and skip OCR text**.
 6. Click **Crop Question**.
 7. Drag over one or more questions. Include each question's answer choices
    when they exist; question-only crops are also supported.
-8. Correct the OCR text if needed and click **Analyze Again**.
+8. In OCR mode, correct the OCR text if needed and click **Analyze Again**.
+   In API image-direct mode, the crop is sent directly to the API model and the
+   OCR editor is skipped.
 9. Review the suggested answer and explanation.
 
 Use **Quick Answer** for a compact result or **Learning Mode** for option
@@ -90,9 +111,11 @@ subject preset when specialized guidance is useful. Enable **Check my answer**
 and enter a label or free-text answer before cropping or analyzing again to
 receive learning-oriented feedback.
 
-Question-quality checks run after OCR. Warnings do not block analysis, while
-serious issues offer **Analyze anyway**, **Edit OCR**, and **Crop again**.
-Analyzing despite a serious warning lowers the displayed reliability.
+Question-quality checks run after OCR-based capture. Warnings do not block
+analysis, while serious issues offer **Analyze anyway**, **Edit OCR**, and
+**Crop again**. Analyzing despite a serious warning lowers the displayed
+reliability. API image-direct mode relies on the API model reading the cropped
+image and does not have OCR line confidence.
 
 After a successful analysis, use **Ask Follow-up** or its quick actions to ask
 about the current question. Follow-up messages are kept only in the current
@@ -101,9 +124,11 @@ subject in Chrome local storage; they cannot override the JSON, evidence, or
 insufficient-information rules.
 
 Follow-up answers stream into the sidebar as they are generated. Requests that
-name a question number use only that question's OCR lines and compact analysis
-context, reducing prompt processing and first-token latency. Follow-up output
-is capped to a concise response and interrupted after 45 seconds.
+name a question number use only that question's OCR lines when available and
+compact analysis context, reducing prompt processing and first-token latency.
+For API image-direct results, follow-up context is based on the parsed question
+and answer fields because no OCR line numbers exist. Follow-up output is capped
+to a concise response and interrupted after 45 seconds.
 
 After a capture, **Re-crop screenshot** opens the same full screenshot in a
 temporary modal. It does not call `captureVisibleTab` again. The screenshot is
@@ -116,6 +141,23 @@ Drag the floating icon toward the right edge to collapse it into a small edge
 handle. Click the handle to expand the icon, then click the icon to open
 QuizBuddy AI. A normal click still opens the sidebar, while a completed drag
 does not trigger it accidentally. The docked state is saved in Chrome storage.
+
+## AI Providers
+
+QuizBuddy supports two provider modes:
+
+- **Local WebGPU (No Internet)** uses the selected browser-local WebLLM model
+  after the model weights have been downloaded and cached. OCR, prompt
+  construction, inference, parsing, reliability scoring, practice, and
+  follow-up work run inside the extension.
+- **OpenAI Compatible API** sends requests to the configured API base URL using
+  the saved API key and model name. OCR-based API analysis sends the editable
+  OCR text. The **Send cropped image directly to API and skip OCR text** option
+  is available only in API mode and sends the cropped image data URL to a
+  vision-capable chat completions model using `image_url` message content.
+
+API settings are stored in Chrome local storage for the extension. QuizBuddy
+does not operate a proxy or backend for these API calls.
 
 ## Model Download
 
@@ -153,7 +195,7 @@ extension or clearing its site data may remove the cached model.
 Content Script
   - Closed Shadow DOM widget and sidebar
   - Crop selection overlay
-  - OCR language, editable text, and model controls
+  - Provider, local model, API, OCR language, editable text, and image-direct controls
   - Mode, subject, answer-check, reliability, practice, and notes UI
   - In-memory re-crop modal and result rendering
 
@@ -166,6 +208,7 @@ Offscreen Document
   - Canvas crop and OCR preprocessing
   - Selectable Vietnamese/English Tesseract.js OCR
   - Multi-model WebLLM setup, cache management, and inference
+  - OpenAI-compatible API calls for OCR text and API-only image-direct analysis
   - AI JSON validation, reliability scoring, and practice generation
   - Question-quality checks, source traces, and grounded follow-up inference
   - Temporary full-screenshot memory and device diagnostics
@@ -173,19 +216,33 @@ Offscreen Document
 
 ## Privacy
 
-QuizBuddy AI does not:
+In **Local WebGPU** mode, QuizBuddy AI does not send question screenshots, OCR
+text, prompts, answers, follow-up messages, or practice requests to an external
+AI inference API. Local model inference runs in the browser through WebGPU after
+the selected model weights are downloaded.
 
-- Send question screenshots or OCR text to Gemini, OpenAI, or another AI API
-- Require an API key
+In **OpenAI Compatible API** mode, QuizBuddy sends the selected request content
+to the configured API endpoint:
+
+- OCR-based API analysis sends OCR text and the analysis prompt.
+- API image-direct analysis sends the cropped image data URL and the analysis
+  prompt to a vision-capable API model.
+- API follow-up and practice requests send the current question context and
+  prompt content needed for that task.
+
+QuizBuddy AI itself does not:
+
 - Operate a backend
+- Proxy API requests through a QuizBuddy server
 - Store question history
 - Persist screenshots, practice questions, or session study notes
 - Persist follow-up messages or analysis results
 - Require login
 - Include analytics or tracking
 
-The first model setup downloads model artifacts from the official MLC
-repository. This is a model download, not remote inference.
+API keys and provider settings are stored in Chrome local storage for the
+extension. The first local model setup downloads model artifacts from the
+official MLC repository. This is a model download, not remote inference.
 
 ## UI Isolation
 
@@ -208,8 +265,9 @@ anti-cheat systems, access controls, or website policy enforcement.
 
 ## Resource Lifecycle
 
-WebLLM and OCR are intentionally loaded in the offscreen document, not in the
-webpage content script. To reduce impact on the active page:
+WebLLM, OCR, API calls, and image processing are intentionally run from the
+extension's background/offscreen flow, not directly inside the webpage content
+script. To reduce impact on the active page:
 
 - Only one Tesseract worker is kept at a time, even when OCR language changes.
 - Closing the sidebar releases WebLLM GPU memory and terminates the OCR worker.
@@ -218,6 +276,9 @@ webpage content script. To reduce impact on the active page:
   worker are unloaded; closing the sidebar clears the temporary screenshot.
 - A temporary offscreen document used only for cache inspection is closed
   immediately after the check.
+- API mode does not load a local WebLLM model unless a local task explicitly
+  needs it. It still uses the offscreen document for crop processing and
+  request orchestration.
 
 Local processing can still temporarily use substantial CPU, RAM, and GPU while
 OCR or inference is actively running.
@@ -238,8 +299,12 @@ For the best available local accuracy:
 - Include the complete question. Include every answer choice when the source
   is multiple-choice.
 - Correct OCR mistakes and use **Analyze Again** before trusting a low-confidence result.
+- For screenshots with diagrams, tables, charts, or dense formulas, API mode
+  with **Send cropped image directly to API and skip OCR text** can preserve
+  visual context that OCR cannot represent. This requires a vision-capable API
+  model and sends the crop to the configured API endpoint.
 
-Inference uses deterministic decoding, a 4096-token context window, and an
+Local inference uses deterministic decoding, a 4096-token context window, and an
 accuracy prompt that splits multi-question crops, solves every question
 independently, and associates repeated A/B/C/D labels only with their own
 question. Standalone markers such as `Câu 1.` are recognized even when OCR
@@ -257,6 +322,11 @@ choices are visible, the extension switches to direct-answer behavior and
 returns the answer content with no option label. The extension still cannot
 guarantee a correct answer.
 
+OpenAI-compatible API analysis uses the same JSON parsing and reliability
+normalization path where possible. If the API returns prose, malformed JSON, or
+an unusable `Unknown`, QuizBuddy retries with a compact JSON-only prompt before
+showing the parsed result or a low-reliability fallback.
+
 ## OCR
 
 Tesseract.js loads bundled Vietnamese and English language data. Users can
@@ -272,7 +342,14 @@ questions. The OCR pipeline:
 6. Normalizes Vietnamese Unicode to NFC.
 
 The extracted text remains editable. **Analyze Again** sends the corrected text
-directly to local WebLLM without recapturing the page or rerunning OCR.
+directly to the selected provider without recapturing the page or rerunning OCR.
+For Local WebGPU this stays in browser-local WebLLM. For API mode it sends the
+edited text to the configured API endpoint.
+
+When **Send cropped image directly to API and skip OCR text** is enabled, the
+OCR pipeline is skipped for that capture. This option is disabled in Local
+WebGPU mode and only appears as active when the OpenAI-compatible API provider
+is selected.
 
 OCR quality still depends on source resolution, font size, contrast, crop
 completeness, and visual noise.
@@ -359,6 +436,7 @@ quizbuddy-ai/
 ├── scripts/                 # Reproducible extension build
 ├── test/                    # Unit and hostile-CSS fixtures
 ├── vendor/
+│   ├── math-ocr/            # Math OCR model/runtime notes
 │   ├── ocr/                 # OCR build notes
 │   └── webllm/              # Runtime source/checksum documentation
 ├── background.js
@@ -380,6 +458,14 @@ inspect `chrome://gpu`.
 Check first-run network access, available GPU memory, and the offscreen document
 console from `chrome://extensions`. Try the Fast model on lower-memory devices.
 Use **Delete Cache** and download again if a cached model is incomplete.
+
+### API analysis returns Unknown
+
+Check the API base URL, API key, model name, and whether the provider supports
+OpenAI-compatible `/chat/completions` requests with JSON responses. For
+image-direct mode, use a vision-capable model that supports `image_url` message
+content. The extension logs raw AI responses to the page console as
+`[QuizBuddy raw AI] ...` for debugging malformed API or model output.
 
 ### OCR misses Vietnamese accents
 
