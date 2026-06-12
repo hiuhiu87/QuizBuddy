@@ -169,6 +169,42 @@ test("parseAIResult preserves a direct answer without choices", () => {
   assert.equal(result.answerLabel, "");
 });
 
+test("parseAIResult can trust model selections for image-direct input", () => {
+  const result = parseAIResult(
+    JSON.stringify({
+      questions: [
+        {
+          questionNumber: 1,
+          questionText: "Which value is even?",
+          questionLineRefs: [],
+          answerSelections: [{ label: "B", text: "Four" }],
+          requiredAnswerCount: 1,
+          answerText: "Four",
+          answerLabel: "B",
+          confidence: "high",
+          shortExplanation: "Four is divisible by 2.",
+          coreKnowledge: "Even numbers",
+          notes: "",
+          optionAnalysis: [
+            { label: "A", text: "Three", isCorrect: false, reason: "Odd." },
+            { label: "B", text: "Four", isCorrect: true, reason: "Even." }
+          ],
+          miniExample: null,
+          userAnswerEvaluation: null,
+          sourceTrace: []
+        }
+      ]
+    }),
+    "",
+    { trustModelSelections: true }
+  );
+
+  assert.deepEqual(result.answerSelections, [{ label: "B", text: "Four" }]);
+  assert.equal(result.answerLabel, "B");
+  assert.equal(result.answerText, "Four");
+  assert.equal(result.optionAnalysis.length, 2);
+});
+
 test("parseAIResult expands a label-only answer using OCR choice text", () => {
   const result = parseAIResult(
     '{"answerText":"B","answerLabel":"B","confidence":"high","shortExplanation":"","coreKnowledge":"","notes":""}',

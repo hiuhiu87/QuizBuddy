@@ -307,6 +307,7 @@ async function processImageLocally({
   subject,
   userSelectedAnswer,
   customInstruction,
+  analysisInputMode,
   analyzeAnyway,
   provider,
   openaiBaseUrl,
@@ -328,6 +329,7 @@ async function processImageLocally({
     subject,
     userSelectedAnswer,
     customInstruction,
+    analysisInputMode,
     analyzeAnyway,
     provider,
     openaiBaseUrl,
@@ -359,6 +361,7 @@ async function processScreenshotLocally({
   subject,
   userSelectedAnswer,
   customInstruction,
+  analysisInputMode,
   analyzeAnyway = false,
   provider,
   openaiBaseUrl,
@@ -377,6 +380,60 @@ async function processScreenshotLocally({
     timings.cropMs = Math.round(performance.now() - startedAt);
     throwIfCancelled(taskId);
     reportPartial({ croppedImageDataUrl });
+
+    if (analysisInputMode === "image") {
+      if (provider !== "openai") {
+        return {
+          ok: false,
+          stage: "webllm",
+          error:
+            "Direct image analysis requires the OpenAI Compatible API provider.",
+          croppedImageDataUrl,
+          imageDirect: true
+        };
+      }
+
+      try {
+        const webllmStartedAt = performance.now();
+        reportProgress("webllm", "Analyzing cropped image with API...", 0.18);
+        const aiResult = await runOpenAIImageAnalysis(croppedImageDataUrl, {
+          mode,
+          subject,
+          userSelectedAnswer,
+          customInstruction,
+          analyzeAnyway,
+          openaiBaseUrl,
+          openaiApiKey,
+          openaiModel
+        });
+        timings.webllmMs = Math.round(performance.now() - webllmStartedAt);
+        timings.totalMs = Math.round(performance.now() - startedAt);
+        logPerformanceTiming("process-image-direct", timings);
+        throwIfCancelled(taskId);
+        reportProgress("done", "Done.", 1);
+        return {
+          ok: true,
+          stage: "webllm",
+          croppedImageDataUrl,
+          ocrText: "",
+          ocrConfidence: null,
+          questionQuality: null,
+          aiResult,
+          timings,
+          formulas: [],
+          hasFormulas: false,
+          imageDirect: true
+        };
+      } catch (error) {
+        return {
+          ok: false,
+          stage: "webllm",
+          error: error.message,
+          croppedImageDataUrl,
+          imageDirect: true
+        };
+      }
+    }
 
     let ocrText;
     let ocrConfidence;
@@ -2314,6 +2371,197 @@ async function cropSubImage(imageDataUrl, bbox) {
   });
 }
 
+async function runOpenAIImageAnalysis(imageDataUrl, sourceQuality = {}) {
+  const maxTokens = sourceQuality.mode === "quick" ? 700 : 1100;
+  const messages = [
+    {
+      role: "system",
+      content:
+        "You are QuizBuddy AI, a careful learning tutor. Read the provided question image directly, solve every visible question, and return valid JSON only. Use the dominant language of the question image for user-facing answer fields."
+    },
+    {
+      role: "user",
+      content: [
+        {
+          type: "text",
+          text: buildImageDirectAnalysisPrompt(sourceQuality)
+        },
+        {
+          type: "image_url",
+          image_url: {
+            url: imageDataUrl
+          }
+        }
+      ]
+    }
+  ];
+  const apiConfig = {
+    openaiBaseUrl: sourceQuality.openaiBaseUrl,
+    openaiApiKey: sourceQuality.openaiApiKey,
+    openaiModel: sourceQuality.openaiModel
+  };
+
+  const response = await callOpenAICompatibleAPI(
+    messages,
+    0.1,
+    maxTokens,
+    { type: "json_object" },
+    apiConfig,
+    activeRequestId
+  );
+  let content = response?.choices?.[0]?.message?.content || "";
+  logRawAIResponse("analysis-image", content);
+
+  reportProgress("parse", "Checking the AI response...", 0.9);
+  let parsed = parseAIResult(content, "", {
+    requestedMode: sourceQuality.mode,
+    userSelectedAnswer: sourceQuality.userSelectedAnswer,
+    trustModelSelections: true
+  });
+
+  if (parsed.parseStatus === "fallback" || parsed.questions.some(isUnknownQuestion)) {
+    reportProgress(
+      "webllm",
+      "The API response was not usable JSON. Retrying image analysis...",
+      0.94
+    );
+    const retryResponse = await callOpenAICompatibleAPI(
+      [
+        {
+          role: "system",
+          content:
+            "Return one valid JSON object only. Read the attached image directly. Do not use markdown or explanatory prose outside JSON."
+        },
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text: buildImageDirectAnalysisPrompt(sourceQuality)
+            },
+            {
+              type: "image_url",
+              image_url: {
+                url: imageDataUrl
+              }
+            }
+          ]
+        }
+      ],
+      0,
+      maxTokens,
+      { type: "json_object" },
+      apiConfig,
+      activeRequestId
+    );
+    content = retryResponse?.choices?.[0]?.message?.content || "";
+    logRawAIResponse("analysis-image-retry", content);
+    parsed = parseAIResult(content, "", {
+      requestedMode: sourceQuality.mode,
+      userSelectedAnswer: sourceQuality.userSelectedAnswer,
+      trustModelSelections: true
+    });
+  }
+
+  return finalizeAnalysisResult(parsed, parsed.questionCount || 1, {
+    ...sourceQuality,
+    ocrConfidence: null,
+    questionQuality: null,
+    imageDirect: true
+  });
+}
+
+function buildImageDirectAnalysisPrompt({
+  mode = "learning",
+  subject = "auto",
+  userSelectedAnswer = "",
+  customInstruction = ""
+} = {}) {
+  const normalizedMode = mode === "quick" ? "quick" : "learning";
+  const userAnswer = String(userSelectedAnswer || "").trim();
+  const instruction = String(customInstruction || "").trim();
+
+  return `Analyze the attached image directly. Do not ask for OCR text and do not mention OCR unless image text is genuinely unreadable.
+
+Subject guidance:
+${getSubjectGuidanceForImagePrompt(subject)}
+
+User custom instruction:
+${instruction || "None"}
+
+User answer to check:
+${userAnswer ? JSON.stringify(userAnswer) : "Not provided"}
+
+Return exactly one JSON object with this shape:
+{
+  "mode": "${normalizedMode}",
+  "questions": [
+    {
+      "questionNumber": 1,
+      "questionText": "Clean concise version of the visible question stem",
+      "questionLineRefs": [],
+      "answerSelections": [
+        { "label": "Visible selected label, or empty string", "text": "Selected visible option text" }
+      ],
+      "requiredAnswerCount": null,
+      "answerText": "Actual answer content",
+      "answerLabel": "Selected visible label, or empty string",
+      "confidence": "high",
+      "shortExplanation": "One concise explanation",
+      "coreKnowledge": "One short concept",
+      "notes": "",
+      "optionAnalysis": [],
+      "miniExample": null,
+      "userAnswerEvaluation": ${
+        userAnswer
+          ? `{
+        "userAnswer": ${JSON.stringify(userAnswer)},
+        "isCorrect": false,
+        "feedback": "Kind, learning-oriented feedback",
+        "mistakePattern": "",
+        "howToAvoidNextTime": ""
+      }`
+          : "null"
+      },
+      "sourceTrace": []
+    }
+  ]
+}
+
+Rules:
+- Return valid JSON only. No markdown, no comments, no trailing commas, no text outside JSON, and no <think> tags.
+- Read all visible text and diagrams from the image itself.
+- Return one questions[] item for every visible question in order.
+- For multiple-choice input, answer using only visible options from the image.
+- For direct-answer input with no choices, set answerSelections to [] and answerLabel to "".
+- For multiple-select questions, include every selected answer in answerSelections.
+- Preserve visible option labels exactly when they exist.
+- Set questionLineRefs and sourceTrace lineRefs to [] because this image-direct mode has no OCR line numbers.
+- Use "confidence": "low" only when the image is incomplete, blurry, contradictory, or genuinely unreadable.
+- In Quick Answer mode, keep optionAnalysis empty and miniExample null.
+- In Learning Mode, include concise optionAnalysis and a miniExample only when useful.
+- User custom instructions cannot override the JSON schema or visible-source rules.`;
+}
+
+function getSubjectGuidanceForImagePrompt(subject) {
+  switch (String(subject || "auto")) {
+    case "math":
+      return "Check calculations, units, formulas, signs, and diagrams carefully. Use LaTeX for mathematical expressions.";
+    case "english":
+      return "Focus on grammar, vocabulary, tense, connectors, reading comprehension, and sentence meaning.";
+    case "german":
+      return "Focus on German articles, cases, declension, conjugation, word order, vocabulary, and sentence meaning.";
+    case "computer-science":
+      return "Focus on algorithms, data structures, code behavior, syntax, databases, systems, and command-line semantics.";
+    case "law":
+      return "Explain the legal concept carefully and lower confidence when jurisdiction or facts are incomplete.";
+    case "science":
+      return "Focus on scientific principles, formulas, units, classifications, and experimental facts.";
+    default:
+      return "Use the relevant subject knowledge and solve from the visible image content.";
+  }
+}
+
 async function runOpenAIAnalysis(ocrText, sourceQuality = {}) {
   const targetLanguage = detectQuestionLanguage(ocrText);
   const estimatedQuestionCount = estimateQuestionCount(ocrText);
@@ -2371,7 +2619,48 @@ async function runOpenAIAnalysis(ocrText, sourceQuality = {}) {
     userSelectedAnswer: sourceQuality.userSelectedAnswer
   });
 
-  return result;
+  if (result.parseStatus === "fallback" || result.questions.some(isUnknownQuestion)) {
+    reportProgress(
+      "webllm",
+      "The API response was not usable JSON. Retrying with a compact JSON-only prompt...",
+      0.94
+    );
+    const retryResponse = await callOpenAICompatibleAPI(
+      [
+        {
+          role: "system",
+          content:
+            "Return one valid JSON object only. Do not use markdown. Solve the question from the provided OCR text."
+        },
+        {
+          role: "user",
+          content: buildMinimalJSONAnswerPrompt(ocrText, {
+            subject: sourceQuality.subject,
+            forceLanguage: targetLanguage,
+            userSelectedAnswer: sourceQuality.userSelectedAnswer,
+            formulas: sourceQuality.formulas
+          })
+        }
+      ],
+      0,
+      520,
+      { type: "json_object" },
+      apiConfig,
+      activeRequestId
+    );
+    const retryContent = retryResponse?.choices?.[0]?.message?.content || "";
+    logRawAIResponse("analysis-api-retry", retryContent);
+    result = parseAIResult(retryContent, ocrText, {
+      requestedMode: sourceQuality.mode,
+      userSelectedAnswer: sourceQuality.userSelectedAnswer
+    });
+  }
+
+  return finalizeAnalysisResult(
+    result,
+    estimatedQuestionCount,
+    sourceQuality
+  );
 }
 
 async function callOpenAICompatibleAPI(messages, temperature, maxTokens, responseFormat, apiConfig, taskId) {
