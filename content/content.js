@@ -1,4 +1,6 @@
 import extensionStyles from "./content.css";
+import designTokenStyles from "./styles/tokens.css";
+import primitiveStyles from "./styles/primitives.css";
 import floatingIconUrl from "../assets/icon.png";
 import {
   ANALYSIS_MODES,
@@ -32,6 +34,28 @@ import katexFontsCSS from "./katex-fonts-base64.css";
 import katexStyles from "katex/dist/katex.min.css";
 import { containsLatexMarkers, renderTextWithFormulas } from "../lib/formula-render.js";
 import { expandFormulasForPrompt } from "../lib/formula-detection.js";
+import {
+  createArtifact,
+  createContextItem,
+  createWorkspace,
+  stripTransientContext
+} from "../lib/knowledge-contracts.js";
+import {
+  createSkillRegistry,
+  normalizeCustomSkill
+} from "../lib/skill-registry.js";
+import { WorkspaceStore } from "../lib/workspace-store.js";
+import {
+  exportWorkspaceBundle,
+  importWorkspaceBundle,
+  searchWorkspaceRecords,
+  toMarkdownExport
+} from "../lib/workspace-utils.js";
+import { createMetricEvent } from "../lib/product-metrics.js";
+import {
+  parseMarkdownBlocks,
+  parseMarkdownInline
+} from "../lib/markdown-utils.js";
 
 (() => {
   const injectionFlag = Symbol.for("qb.content.injected");
@@ -77,6 +101,23 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
   let customInstructions = normalizeCustomInstructions(null);
   let pendingQuestionQuality = null;
   let followupStreamingBubble = null;
+  let selectedWorkspaceTab = "chat";
+  let chatHistory = [];
+  let pendingChatImage = null;
+  let chatStreamingBubble = null;
+  let currentKnowledgeContext = null;
+  let knowledgeContexts = [];
+  let currentSkillResult = null;
+  let currentWorkspace = null;
+  let retentionPolicy = "30-days";
+  let workspaceStore = createPersistentWorkspaceClient();
+  let userProfile = {};
+  let customSkills = [];
+  let skillRegistry = createSkillRegistry();
+  let activeKnowledgeSkillId = "";
+  let lastKnowledgeRunSignature = "";
+  let sidebarWidth = 390;
+  let sidebarResizeState = null;
 
   const MODEL_SELECTION_KEY = "qbSelectedModelId";
   const OCR_LANGUAGE_KEY = "qbOcrLanguage";
@@ -89,6 +130,10 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
   const OPENAI_BASE_URL_KEY = "qbOpenAiBaseUrl";
   const OPENAI_API_KEY_KEY = "qbOpenAiApiKey";
   const OPENAI_MODEL_KEY = "qbOpenAiModel";
+  const RETENTION_POLICY_KEY = "qbRetentionPolicy";
+  const ACTIVE_WORKSPACE_KEY = "qbActiveWorkspaceId";
+  const PROFILE_KEY = "qbKnowledgeProfile";
+  const SIDEBAR_WIDTH_KEY = "qbSidebarWidth";
   const systemThemeMedia = window.matchMedia("(prefers-color-scheme: dark)");
   const host = document.createElement("div");
   setProtectedHostStyles(host);
@@ -96,7 +141,12 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
 
   const shadowRoot = host.attachShadow({ mode: "closed" });
   const style = document.createElement("style");
-  style.textContent = extensionStyles + "\n" + katexStyles;
+  style.textContent = [
+    designTokenStyles,
+    primitiveStyles,
+    extensionStyles,
+    katexStyles
+  ].join("\n");
   shadowRoot.append(style);
 
   // Inject KaTeX base64 fonts into document head so it is visible to shadow DOM
@@ -109,8 +159,8 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
 
   const floatingButton = createElement("button", "qb-floating-button");
   floatingButton.type = "button";
-  floatingButton.title = "Open QuizBuddy AI";
-  floatingButton.setAttribute("aria-label", "Open QuizBuddy AI");
+  floatingButton.title = "Open QuizBuddy Labs";
+  floatingButton.setAttribute("aria-label", "Open QuizBuddy Labs");
   const icon = document.createElement("img");
   icon.src = floatingIconUrl;
   icon.alt = "";
@@ -121,19 +171,126 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
   floatingButton.append(icon, dockHandle);
 
   const sidebar = createElement("aside", "qb-sidebar");
-  sidebar.setAttribute("aria-label", "QuizBuddy AI");
+  sidebar.setAttribute("aria-label", "QuizBuddy Labs");
   sidebar.innerHTML = `
+    <div class="qb-sidebar-resize-handle" role="separator" tabindex="0" aria-label="Resize sidebar" aria-orientation="vertical" title="Drag to resize. Double-click to reset."></div>
     <div class="qb-sidebar-header">
       <div>
-        <div class="qb-title">QuizBuddy AI</div>
-        <div class="qb-subtitle">Local question analysis</div>
+        <div class="qb-title">QuizBuddy Labs</div>
+        <div class="qb-subtitle">Local-first Knowledge Copilot</div>
       </div>
       <div class="qb-header-actions">
-        <button class="qb-theme-button" type="button" aria-label="Switch theme"></button>
+        <button class="qb-settings-button" type="button" aria-label="Open settings" title="Settings">Settings</button>
         <button class="qb-close-button" type="button" aria-label="Close sidebar">&times;</button>
       </div>
     </div>
-    <div class="qb-sidebar-body">
+    <div class="qb-workspace-tabs" role="tablist" aria-label="QuizBuddy workspace">
+      <button class="qb-workspace-tab qb-workspace-tab-active" type="button" role="tab" aria-selected="true" data-workspace-tab="chat">
+        <span class="qb-tab-label">Ask</span>
+        <span class="qb-tab-hint">Anything</span>
+      </button>
+      <button class="qb-workspace-tab" type="button" role="tab" aria-selected="false" data-workspace-tab="quick">
+        <span class="qb-tab-label">Solve</span>
+        <span class="qb-tab-hint">A question</span>
+      </button>
+      <button class="qb-workspace-tab" type="button" role="tab" aria-selected="false" data-workspace-tab="capture">
+        <span class="qb-tab-label">Capture</span>
+        <span class="qb-tab-hint">Page content</span>
+      </button>
+      <button class="qb-workspace-tab" type="button" role="tab" aria-selected="false" data-workspace-tab="library">
+        <span class="qb-tab-label">Library</span>
+        <span class="qb-tab-hint">Saved work</span>
+      </button>
+    </div>
+    <div class="qb-knowledge-panel qb-workspace-panel qb-hidden" role="tabpanel" data-workspace-panel="capture">
+      <div class="qb-knowledge-hero">
+        <div class="qb-eyebrow">Structured workflow</div>
+        <div class="qb-knowledge-title">Capture and transform</div>
+        <div class="qb-knowledge-description">Choose a source first, then apply one focused skill to it.</div>
+      </div>
+      <div class="qb-step-label"><span>1</span> Choose a source</div>
+      <div class="qb-capture-actions">
+        <button class="qb-capture-selection" type="button"><strong>Selection</strong><span>Highlighted text</span></button>
+        <button class="qb-capture-page" type="button"><strong>Current page</strong><span>Readable content</span></button>
+        <button class="qb-capture-last-crop" type="button"><strong>Last crop</strong><span>Recent image text</span></button>
+        <button class="qb-capture-quiz" type="button"><strong>New crop</strong><span>Select on screen</span></button>
+      </div>
+      <div class="qb-knowledge-status" role="status">Select text on the page or capture the readable page content.</div>
+      <section class="qb-knowledge-card qb-context-editor qb-hidden">
+        <label class="qb-field-label" for="qb-context-title">Context title</label>
+        <input id="qb-context-title" class="qb-input qb-context-title" maxlength="160" />
+        <label class="qb-field-label" for="qb-context-text">Editable context preview</label>
+        <textarea id="qb-context-text" class="qb-knowledge-textarea qb-context-text" rows="10" maxlength="120000"></textarea>
+        <div class="qb-context-source"></div>
+        <button class="qb-add-source" type="button">Add Source to Workspace</button>
+      </section>
+      <section class="qb-knowledge-card qb-skill-controls">
+        <div class="qb-step-label"><span>2</span> Choose a skill</div>
+        <label class="qb-field-label" for="qb-skill-select">Skill</label>
+        <select id="qb-skill-select" class="qb-select qb-skill-select">
+          ${skillRegistry
+            .list()
+            .filter((skill) => !skill.custom)
+            .map((skill) => `<option value="${skill.id}">${skill.name}</option>`)
+            .join("")}
+        </select>
+        <label class="qb-field-label" for="qb-skill-setting">Skill option or question</label>
+        <input id="qb-skill-setting" class="qb-input qb-skill-setting" placeholder="Beginner, brief, facts, professional, Vietnamese, or a question" />
+        <button class="qb-run-skill" type="button" disabled>Run Skill</button>
+      </section>
+      <section class="qb-knowledge-card qb-skill-result qb-hidden">
+        <div class="qb-section-heading-row">
+          <div class="qb-card-title qb-skill-result-title">Result</div>
+          <button class="qb-save-artifact" type="button">Save</button>
+        </div>
+        <div class="qb-skill-result-content"></div>
+        <div class="qb-skill-result-meta"></div>
+      </section>
+      <details class="qb-knowledge-card qb-personalization">
+        <summary>Advanced personalization</summary>
+        <div class="qb-personalization-grid">
+          <input class="qb-input qb-profile-language" placeholder="Preferred language" />
+          <input class="qb-input qb-profile-occupation" placeholder="Occupation" />
+          <input class="qb-input qb-profile-expertise" placeholder="Expertise level" />
+          <input class="qb-input qb-profile-tone" placeholder="Preferred tone" />
+          <input class="qb-input qb-profile-format" placeholder="Preferred output format" />
+          <button class="qb-profile-save" type="button">Save Profile</button>
+        </div>
+        <div class="qb-memory-editor">
+          <input class="qb-input qb-memory-label" placeholder="Memory label" />
+          <input class="qb-input qb-memory-value" placeholder="What should QuizBuddy remember?" />
+          <button class="qb-memory-save" type="button">Remember</button>
+          <div class="qb-memory-list"></div>
+        </div>
+        <div class="qb-custom-skill-editor">
+          <input class="qb-input qb-custom-skill-name" placeholder="Custom skill name" />
+          <input class="qb-input qb-custom-skill-description" placeholder="Short description" />
+          <textarea class="qb-knowledge-textarea qb-custom-skill-instruction" rows="3" maxlength="8000" placeholder="Declarative instruction"></textarea>
+          <select class="qb-select qb-custom-skill-input">
+            <option value="selection,crop,page,artifact">Text, crop, page, or artifact</option>
+            <option value="selection">Selected text only</option>
+            <option value="page">Page only</option>
+            <option value="artifact">Artifact only</option>
+          </select>
+          <select class="qb-select qb-custom-skill-output">
+            <option value="markdown">Markdown output</option>
+            <option value="json">JSON output</option>
+            <option value="table">Table output</option>
+          </select>
+          <button class="qb-custom-skill-save" type="button">Add Custom Skill</button>
+        </div>
+      </details>
+      <div class="qb-knowledge-error qb-hidden" role="alert"></div>
+    </div>
+    <div class="qb-settings-panel qb-workspace-panel qb-hidden" role="tabpanel" data-workspace-panel="settings">
+      <div class="qb-panel-heading">
+        <button class="qb-settings-back" type="button" aria-label="Back to Ask">Back</button>
+        <div>
+          <div class="qb-eyebrow">Preferences</div>
+          <div class="qb-panel-title">Settings</div>
+          <div class="qb-panel-description">AI provider, model, OCR and answer behavior.</div>
+        </div>
+      </div>
       <section class="qb-model-card">
         <div class="qb-model-card-title">AI Provider & Model</div>
         
@@ -291,9 +448,26 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
           </div>
         </details>
       </section>
+      <section class="qb-settings-appearance">
+        <div>
+          <div class="qb-card-title">Appearance</div>
+          <div class="qb-card-description">Switch between light and dark mode.</div>
+        </div>
+        <button class="qb-theme-button" type="button" aria-label="Switch theme"></button>
+      </section>
+    </div>
+    <div class="qb-sidebar-body qb-workspace-panel qb-quick-crop-panel qb-hidden" role="tabpanel" data-workspace-panel="quick">
+      <div class="qb-solve-hero">
+        <div>
+          <div class="qb-eyebrow">Question workflow</div>
+          <div class="qb-panel-title">Solve a question</div>
+          <div class="qb-panel-description">Crop one complete question. QuizBuddy reads it, explains the answer and creates follow-up practice.</div>
+        </div>
+        <button class="qb-solve-settings" type="button">Configure</button>
+      </div>
       <section class="qb-primary-actions">
-        <button class="qb-crop-button" type="button">Crop Question</button>
-        <div class="qb-status" role="status" aria-live="polite">Ready to crop a question.</div>
+        <button class="qb-crop-button" type="button">Start screen crop</button>
+        <div class="qb-status" role="status" aria-live="polite">Include the full prompt, choices and any diagram.</div>
         <button class="qb-cancel-button qb-hidden" type="button">Cancel current task</button>
       </section>
       <section class="qb-quality-card qb-hidden" role="alert">
@@ -361,12 +535,82 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
       </section>
       <section class="qb-error-card qb-hidden" role="alert"></section>
     </div>
+    <div class="qb-chat-panel qb-workspace-panel" role="tabpanel" data-workspace-panel="chat">
+      <div class="qb-chat-toolbar">
+        <div>
+          <div class="qb-eyebrow">Quick conversation</div>
+          <div class="qb-chat-title">Ask QuizBuddy</div>
+          <div class="qb-chat-model-label"></div>
+        </div>
+        <button class="qb-chat-clear" type="button">Clear</button>
+      </div>
+      <div class="qb-chat-messages" aria-live="polite">
+        <div class="qb-chat-empty">
+          <div class="qb-chat-empty-icon">Q</div>
+          <div class="qb-chat-empty-title">What do you want to understand?</div>
+          <div class="qb-chat-empty-text">Type a question, or start with content already on this page.</div>
+          <div class="qb-chat-starters">
+            <button class="qb-chat-start-solve" type="button"><strong>Solve a question</strong><span>Crop a prompt on screen</span></button>
+            <button class="qb-chat-start-selection" type="button"><strong>Explain selection</strong><span>Use highlighted text</span></button>
+            <button class="qb-chat-start-page" type="button"><strong>Summarize page</strong><span>Use readable page content</span></button>
+          </div>
+        </div>
+      </div>
+      <div class="qb-chat-attachment qb-hidden">
+        <img class="qb-chat-attachment-image" alt="Attached image preview" />
+        <div class="qb-chat-attachment-meta">
+          <div class="qb-chat-attachment-name"></div>
+          <div class="qb-chat-attachment-note">Image will be sent with your next message.</div>
+        </div>
+        <button class="qb-chat-attachment-remove" type="button" aria-label="Remove attached image">&times;</button>
+      </div>
+      <div class="qb-chat-error qb-hidden" role="alert"></div>
+      <div class="qb-chat-compose">
+        <input class="qb-chat-file-input" type="file" accept="image/png,image/jpeg,image/webp" hidden />
+        <button class="qb-chat-attach" type="button" aria-label="Attach image" title="Attach image">+</button>
+        <textarea class="qb-chat-input" rows="1" maxlength="12000" placeholder="Ask anything..." aria-label="Chat message"></textarea>
+        <button class="qb-chat-send" type="button">Ask</button>
+      </div>
+      <div class="qb-chat-hint">Enter to send, Shift+Enter for a new line. Paste an image from the clipboard to attach it.</div>
+    </div>
+    <div class="qb-library-panel qb-workspace-panel qb-hidden" role="tabpanel" data-workspace-panel="library">
+      <div class="qb-library-toolbar">
+        <div>
+          <div class="qb-chat-title">Local Library</div>
+          <div class="qb-chat-model-label">Stored in IndexedDB on this device.</div>
+        </div>
+        <div class="qb-library-toolbar-actions">
+          <input class="qb-library-import-input" type="file" accept="application/json" hidden />
+          <button class="qb-library-import" type="button">Import</button>
+          <button class="qb-library-export" type="button">Export</button>
+        </div>
+      </div>
+      <div class="qb-library-controls">
+        <div class="qb-workspace-picker-row">
+          <select class="qb-select qb-workspace-picker" aria-label="Active workspace"></select>
+          <button class="qb-new-workspace" type="button">New</button>
+        </div>
+        <input class="qb-input qb-library-search" type="search" placeholder="Search saved artifacts" />
+        <select class="qb-select qb-retention-policy" aria-label="Retention policy">
+          <option value="session">Session only</option>
+          <option value="7-days">Keep 7 days</option>
+          <option value="30-days">Keep 30 days</option>
+          <option value="forever">Keep forever</option>
+        </select>
+      </div>
+      <div class="qb-library-list"></div>
+      <button class="qb-library-clear" type="button">Delete all local workspace data</button>
+    </div>
   `;
 
   shadowRoot.append(floatingButton, sidebar);
   document.documentElement.append(host);
 
   const closeButton = sidebar.querySelector(".qb-close-button");
+  const sidebarResizeHandle = sidebar.querySelector(".qb-sidebar-resize-handle");
+  const settingsButton = sidebar.querySelector(".qb-settings-button");
+  const settingsBackButton = sidebar.querySelector(".qb-settings-back");
+  const solveSettingsButton = sidebar.querySelector(".qb-solve-settings");
   const themeButton = sidebar.querySelector(".qb-theme-button");
   const modelCard = sidebar.querySelector(".qb-model-card");
   const modelCardTitle = sidebar.querySelector(".qb-model-card-title");
@@ -440,6 +684,71 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
   const followupInput = sidebar.querySelector(".qb-followup-input");
   const followupSend = sidebar.querySelector(".qb-followup-send");
   const followupChips = [...sidebar.querySelectorAll(".qb-followup-chip")];
+  const workspaceTabs = [...sidebar.querySelectorAll(".qb-workspace-tab")];
+  const workspacePanels = [...sidebar.querySelectorAll(".qb-workspace-panel")];
+  const chatMessages = sidebar.querySelector(".qb-chat-messages");
+  const chatModelLabel = sidebar.querySelector(".qb-chat-model-label");
+  const chatClearButton = sidebar.querySelector(".qb-chat-clear");
+  const chatFileInput = sidebar.querySelector(".qb-chat-file-input");
+  const chatAttachButton = sidebar.querySelector(".qb-chat-attach");
+  const chatInput = sidebar.querySelector(".qb-chat-input");
+  const chatSendButton = sidebar.querySelector(".qb-chat-send");
+  const chatAttachment = sidebar.querySelector(".qb-chat-attachment");
+  const chatAttachmentImage = sidebar.querySelector(".qb-chat-attachment-image");
+  const chatAttachmentName = sidebar.querySelector(".qb-chat-attachment-name");
+  const chatAttachmentRemove = sidebar.querySelector(".qb-chat-attachment-remove");
+  const chatError = sidebar.querySelector(".qb-chat-error");
+  const chatStartSolveButton = sidebar.querySelector(".qb-chat-start-solve");
+  const chatStartSelectionButton = sidebar.querySelector(".qb-chat-start-selection");
+  const chatStartPageButton = sidebar.querySelector(".qb-chat-start-page");
+  const captureSelectionButton = sidebar.querySelector(".qb-capture-selection");
+  const capturePageButton = sidebar.querySelector(".qb-capture-page");
+  const captureLastCropButton = sidebar.querySelector(".qb-capture-last-crop");
+  const captureQuizButton = sidebar.querySelector(".qb-capture-quiz");
+  const knowledgeStatus = sidebar.querySelector(".qb-knowledge-status");
+  const contextEditor = sidebar.querySelector(".qb-context-editor");
+  const contextTitleInput = sidebar.querySelector(".qb-context-title");
+  const contextTextInput = sidebar.querySelector(".qb-context-text");
+  const contextSource = sidebar.querySelector(".qb-context-source");
+  const addSourceButton = sidebar.querySelector(".qb-add-source");
+  const skillSelect = sidebar.querySelector(".qb-skill-select");
+  const skillSettingInput = sidebar.querySelector(".qb-skill-setting");
+  const runSkillButton = sidebar.querySelector(".qb-run-skill");
+  const skillResultSection = sidebar.querySelector(".qb-skill-result");
+  const skillResultTitle = sidebar.querySelector(".qb-skill-result-title");
+  const skillResultContent = sidebar.querySelector(".qb-skill-result-content");
+  const skillResultMeta = sidebar.querySelector(".qb-skill-result-meta");
+  const saveArtifactButton = sidebar.querySelector(".qb-save-artifact");
+  const knowledgeError = sidebar.querySelector(".qb-knowledge-error");
+  const librarySearch = sidebar.querySelector(".qb-library-search");
+  const workspacePicker = sidebar.querySelector(".qb-workspace-picker");
+  const newWorkspaceButton = sidebar.querySelector(".qb-new-workspace");
+  const retentionPolicySelect = sidebar.querySelector(".qb-retention-policy");
+  const libraryList = sidebar.querySelector(".qb-library-list");
+  const libraryExportButton = sidebar.querySelector(".qb-library-export");
+  const libraryImportButton = sidebar.querySelector(".qb-library-import");
+  const libraryImportInput = sidebar.querySelector(".qb-library-import-input");
+  const libraryClearButton = sidebar.querySelector(".qb-library-clear");
+  const profileLanguage = sidebar.querySelector(".qb-profile-language");
+  const profileOccupation = sidebar.querySelector(".qb-profile-occupation");
+  const profileExpertise = sidebar.querySelector(".qb-profile-expertise");
+  const profileTone = sidebar.querySelector(".qb-profile-tone");
+  const profileFormat = sidebar.querySelector(".qb-profile-format");
+  const profileSaveButton = sidebar.querySelector(".qb-profile-save");
+  const memoryLabelInput = sidebar.querySelector(".qb-memory-label");
+  const memoryValueInput = sidebar.querySelector(".qb-memory-value");
+  const memorySaveButton = sidebar.querySelector(".qb-memory-save");
+  const memoryList = sidebar.querySelector(".qb-memory-list");
+  const customSkillNameInput = sidebar.querySelector(".qb-custom-skill-name");
+  const customSkillDescriptionInput = sidebar.querySelector(
+    ".qb-custom-skill-description"
+  );
+  const customSkillInstructionInput = sidebar.querySelector(
+    ".qb-custom-skill-instruction"
+  );
+  const customSkillOutputSelect = sidebar.querySelector(".qb-custom-skill-output");
+  const customSkillInputSelect = sidebar.querySelector(".qb-custom-skill-input");
+  const customSkillSaveButton = sidebar.querySelector(".qb-custom-skill-save");
 
   ocrTabs.forEach((tab) => {
     tab.addEventListener("click", () => {
@@ -500,6 +809,15 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
     sidebar.classList.remove("qb-sidebar-open");
     releaseLocalResources();
   });
+  sidebarResizeHandle.addEventListener("pointerdown", startSidebarResize);
+  sidebarResizeHandle.addEventListener("pointermove", resizeSidebar);
+  sidebarResizeHandle.addEventListener("pointerup", finishSidebarResize);
+  sidebarResizeHandle.addEventListener("pointercancel", finishSidebarResize);
+  sidebarResizeHandle.addEventListener("dblclick", resetSidebarWidth);
+  sidebarResizeHandle.addEventListener("keydown", resizeSidebarWithKeyboard);
+  settingsButton.addEventListener("click", () => switchWorkspaceTab("settings"));
+  settingsBackButton.addEventListener("click", () => switchWorkspaceTab("chat"));
+  solveSettingsButton.addEventListener("click", () => switchWorkspaceTab("settings"));
   themeButton.addEventListener("click", toggleTheme);
   providerSelect.addEventListener("change", onProviderChange);
   openaiSaveButton.addEventListener("click", onOpenaiSaveSettings);
@@ -559,11 +877,58 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
   followupChips.forEach((chip) =>
     chip.addEventListener("click", () => sendFollowUp(chip.textContent))
   );
+  workspaceTabs.forEach((tab) =>
+    tab.addEventListener("click", () => switchWorkspaceTab(tab.dataset.workspaceTab))
+  );
+  chatClearButton.addEventListener("click", clearChat);
+  chatAttachButton.addEventListener("click", () => chatFileInput.click());
+  chatFileInput.addEventListener("change", onChatFileSelected);
+  chatAttachmentRemove.addEventListener("click", clearPendingChatImage);
+  chatSendButton.addEventListener("click", sendChatMessage);
+  chatInput.addEventListener("input", resizeChatInput);
+  chatInput.addEventListener("paste", onChatPaste);
+  chatInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      sendChatMessage();
+    }
+  });
+  chatStartSolveButton.addEventListener("click", () => switchWorkspaceTab("quick"));
+  chatStartSelectionButton.addEventListener("click", () => {
+    switchWorkspaceTab("capture");
+    captureSelectedText();
+  });
+  chatStartPageButton.addEventListener("click", () => {
+    switchWorkspaceTab("capture");
+    captureCurrentPage();
+  });
+  captureSelectionButton.addEventListener("click", captureSelectedText);
+  capturePageButton.addEventListener("click", captureCurrentPage);
+  captureLastCropButton.addEventListener("click", captureLastQuizCrop);
+  captureQuizButton.addEventListener("click", () => switchWorkspaceTab("quick"));
+  contextTitleInput.addEventListener("input", syncKnowledgeContextEditor);
+  contextTextInput.addEventListener("input", syncKnowledgeContextEditor);
+  addSourceButton.addEventListener("click", addCurrentSourceToWorkspace);
+  skillSelect.addEventListener("change", updateSkillSettingHint);
+  runSkillButton.addEventListener("click", runSelectedKnowledgeSkill);
+  saveArtifactButton.addEventListener("click", saveCurrentArtifact);
+  librarySearch.addEventListener("input", renderLibrary);
+  workspacePicker.addEventListener("change", selectWorkspace);
+  newWorkspaceButton.addEventListener("click", createNewWorkspace);
+  retentionPolicySelect.addEventListener("change", updateRetentionPolicy);
+  libraryExportButton.addEventListener("click", exportCurrentWorkspace);
+  libraryImportButton.addEventListener("click", () => libraryImportInput.click());
+  libraryImportInput.addEventListener("change", importWorkspaceFile);
+  libraryClearButton.addEventListener("click", clearWorkspaceData);
+  profileSaveButton.addEventListener("click", saveKnowledgeProfile);
+  memorySaveButton.addEventListener("click", saveExplicitMemory);
+  customSkillSaveButton.addEventListener("click", saveCustomSkill);
   floatingButton.addEventListener("pointerdown", onFloatingPointerDown);
   floatingButton.addEventListener("pointermove", onFloatingPointerMove);
   floatingButton.addEventListener("pointerup", onFloatingPointerUp);
   floatingButton.addEventListener("pointercancel", resetFloatingPointer);
   window.addEventListener("pagehide", releaseLocalResources);
+  window.addEventListener("resize", applySidebarWidth);
   systemThemeMedia.addEventListener("change", () => {
     if (selectedTheme === "system") {
       applyTheme();
@@ -609,7 +974,13 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
       message.type === "QB_PROCESS_PARTIAL" &&
       (message.taskId || message.requestId) === activeRequestId
     ) {
-      renderPartialResult(message);
+      if (typeof message.chatText === "string") {
+        renderStreamingChatText(message.chatText);
+      } else if (typeof message.skillText === "string") {
+        renderStreamingSkillText(message.skillText);
+      } else {
+        renderPartialResult(message);
+      }
     }
 
     if (
@@ -625,8 +996,1002 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
   async function startCropFromShortcut() {
     await ensureModelOnboarding();
     if (modelReady) {
+      switchWorkspaceTab("quick");
       startCropMode();
     }
+  }
+
+  function switchWorkspaceTab(tabName) {
+    selectedWorkspaceTab = ["capture", "quick", "chat", "library", "settings"].includes(tabName)
+      ? tabName
+      : "chat";
+    workspaceTabs.forEach((tab) => {
+      const selected = tab.dataset.workspaceTab === selectedWorkspaceTab;
+      tab.classList.toggle("qb-workspace-tab-active", selected);
+      tab.setAttribute("aria-selected", String(selected));
+    });
+    settingsButton.classList.toggle(
+      "qb-settings-button-active",
+      selectedWorkspaceTab === "settings"
+    );
+    settingsButton.setAttribute(
+      "aria-pressed",
+      String(selectedWorkspaceTab === "settings")
+    );
+    workspacePanels.forEach((panel) => {
+      panel.classList.toggle(
+        "qb-hidden",
+        panel.dataset.workspacePanel !== selectedWorkspaceTab
+      );
+    });
+    if (selectedWorkspaceTab === "chat") {
+      updateChatProviderState();
+      chatInput.focus();
+      chatMessages.scrollTop = chatMessages.scrollHeight;
+    } else if (selectedWorkspaceTab === "library") {
+      renderLibrary();
+    }
+  }
+
+  function captureSelectedText() {
+    const text = String(window.getSelection()?.toString() || "").trim();
+    if (!text) {
+      showKnowledgeError("Select text on the page before using this action.");
+      return;
+    }
+    setKnowledgeContext({
+      type: "selection",
+      title: `Selection from ${document.title || location.hostname}`,
+      text,
+      source: {
+        url: location.href,
+        pageTitle: document.title,
+        capturedAt: new Date().toISOString()
+      },
+      metadata: { characterCount: text.length }
+    });
+  }
+
+  function captureCurrentPage() {
+    const clone = document.body.cloneNode(true);
+    clone
+      .querySelectorAll("script, style, noscript, nav, header, footer, form")
+      .forEach((element) => element.remove());
+    const text = String(clone.innerText || clone.textContent || "")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim()
+      .slice(0, 120000);
+    if (!text) {
+      showKnowledgeError("No readable page content was found.");
+      return;
+    }
+    setKnowledgeContext({
+      type: "page",
+      title: document.title || location.hostname,
+      text,
+      source: {
+        url: location.href,
+        pageTitle: document.title,
+        capturedAt: new Date().toISOString()
+      },
+      metadata: { characterCount: text.length }
+    });
+  }
+
+  function captureLastQuizCrop() {
+    if (!lastAnalysisContext?.ocrText) {
+      showKnowledgeError(
+        "Complete a Quiz crop first, then return here to transform its context."
+      );
+      return;
+    }
+    setKnowledgeContext({
+      type: "crop",
+      title: `Crop from ${document.title || location.hostname}`,
+      text: lastAnalysisContext.ocrText,
+      imageDataUrl: lastAnalysisContext.croppedImageDataUrl || "",
+      source: {
+        url: location.href,
+        pageTitle: document.title,
+        capturedAt: new Date().toISOString()
+      },
+      metadata: { inputMode: lastAnalysisContext.inputMode || "ocr" }
+    });
+  }
+
+  function setKnowledgeContext(input) {
+    try {
+      currentKnowledgeContext = createContextItem(input);
+      const duplicateIndex = knowledgeContexts.findIndex(
+        (item) =>
+          item.source.url === currentKnowledgeContext.source.url &&
+          item.text === currentKnowledgeContext.text
+      );
+      if (duplicateIndex >= 0) {
+        knowledgeContexts[duplicateIndex] = currentKnowledgeContext;
+      } else {
+        knowledgeContexts.push(currentKnowledgeContext);
+        knowledgeContexts = knowledgeContexts.slice(-12);
+      }
+      currentSkillResult = null;
+      contextTitleInput.value = currentKnowledgeContext.title;
+      contextTextInput.value = currentKnowledgeContext.text;
+      contextSource.textContent = `${
+        currentKnowledgeContext.source.url || "Local context"
+      } · ${knowledgeContexts.length} source(s) in this research session`;
+      contextEditor.classList.remove("qb-hidden");
+      skillResultSection.classList.add("qb-hidden");
+      runSkillButton.disabled = false;
+      knowledgeStatus.textContent = `${currentKnowledgeContext.text.length.toLocaleString()} characters captured. Review the context before running a skill.`;
+      clearKnowledgeError();
+      updateSkillSettingHint();
+    } catch (error) {
+      showKnowledgeError(error.message);
+    }
+  }
+
+  function syncKnowledgeContextEditor() {
+    if (!currentKnowledgeContext) return;
+    currentKnowledgeContext = {
+      ...currentKnowledgeContext,
+      title: contextTitleInput.value.trim() || currentKnowledgeContext.title,
+      text: contextTextInput.value
+    };
+    knowledgeContexts = knowledgeContexts.map((item) =>
+      item.id === currentKnowledgeContext.id ? currentKnowledgeContext : item
+    );
+    runSkillButton.disabled = !currentKnowledgeContext.text.trim();
+    currentSkillResult = null;
+    skillResultSection.classList.add("qb-hidden");
+  }
+
+  function updateSkillSettingHint() {
+    const hints = {
+      quiz: "quick or learning",
+      explain: "beginner, professional, or expert",
+      summarize: "brief, bullets, or executive",
+      extract: "facts, entities, tasks, dates, or table",
+      rewrite: "concise, professional, friendly, or persuasive",
+      translate: "Target language, for example Vietnamese",
+      ask: "Question to answer from this context",
+      "research-brief": "Research objective",
+      "decision-matrix": "Decision criteria",
+      "action-checklist": "Objective for the reviewable checklist"
+    };
+    skillSettingInput.placeholder = hints[skillSelect.value] || "Optional";
+  }
+
+  async function runSelectedKnowledgeSkill() {
+    if (!currentKnowledgeContext?.text.trim() || activeRequestId) return;
+    await ensureModelOnboarding();
+    if (!modelReady) {
+      showKnowledgeError("Prepare a local model or configure the API provider.");
+      return;
+    }
+
+    syncKnowledgeContextEditor();
+    const skillId = skillSelect.value;
+    const isResearchSkill = [
+      "compare-sources",
+      "agreements-contradictions",
+      "research-brief",
+      "decision-matrix"
+    ].includes(skillId);
+    if (isResearchSkill && currentWorkspace?.contextIds?.length) {
+      const storedContexts = (
+        await Promise.all(
+          currentWorkspace.contextIds.map((id) =>
+            workspaceStore.get("contexts", id)
+          )
+        )
+      ).filter(Boolean);
+      const contextById = new Map(
+        [...storedContexts, ...knowledgeContexts].map((item) => [item.id, item])
+      );
+      knowledgeContexts = [...contextById.values()].slice(-12);
+    }
+    const skillContexts = isResearchSkill
+      ? knowledgeContexts
+      : [currentKnowledgeContext];
+    const enabledMemories = (await workspaceStore.getAll("memories")).filter(
+      (memory) => memory.enabled !== false
+    );
+    const taskProfile = {
+      ...userProfile,
+      memory: enabledMemories
+        .map((memory) => `${memory.label}: ${memory.value}`)
+        .join("; ")
+        .slice(0, 2000)
+    };
+    const settings = getKnowledgeSkillSettings(skillId, skillSettingInput.value);
+    const runSignature = `${skillId}:${skillContexts.map((item) => item.id).join(",")}`;
+    if (runSignature === lastKnowledgeRunSignature) {
+      recordLocalMetric({
+        name: "skill_retried",
+        skillId,
+        provider: selectedProvider,
+        success: true
+      });
+    }
+    lastKnowledgeRunSignature = runSignature;
+    activeRequestId = crypto.randomUUID();
+    activeKnowledgeSkillId = skillId;
+    const taskId = activeRequestId;
+    const startedAt = performance.now();
+    currentSkillResult = null;
+    skillResultTitle.textContent = `${skillRegistry.get(skillId)?.name || "Skill"} result`;
+    skillResultContent.textContent = "Working...";
+    skillResultMeta.textContent = "";
+    skillResultSection.classList.remove("qb-hidden");
+    saveArtifactButton.disabled = true;
+    clearKnowledgeError();
+    setProcessingState(true);
+    recordLocalMetric({
+      name: "skill_started",
+      skillId,
+      provider: selectedProvider,
+      success: true
+    });
+
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: "QB_RUN_SKILL",
+        protocolVersion: 1,
+        taskId,
+        skillId,
+        context: skillContexts,
+        settings,
+        profile: taskProfile,
+        customSkills,
+        provider: selectedProvider,
+        modelId: selectedModelId,
+        openaiBaseUrl: selectedOpenaiBaseUrl,
+        openaiApiKey: selectedOpenaiApiKey,
+        openaiModel: selectedOpenaiModel
+      });
+      if (activeRequestId !== taskId) return;
+      if (!response?.ok) {
+        throw new Error(response?.error || "Could not run this skill.");
+      }
+      currentSkillResult = response;
+      if (response.actionProposal) {
+        renderActionProposal(response.actionProposal);
+      } else {
+        renderStreamingSkillText(response.content);
+      }
+      const warnings = [];
+      if (response.invalidSourceRefs?.length) {
+        warnings.push("Removed or unverified source references were detected.");
+      }
+      if (response.omittedSourceIds?.length) {
+        warnings.push(`${response.omittedSourceIds.length} source(s) exceeded the context limit.`);
+      }
+      renderSkillSourceRefs(response.sourceRefs || [], warnings);
+      saveArtifactButton.disabled = false;
+      recordLocalMetric({
+        name: "skill_completed",
+        skillId,
+        provider: selectedProvider,
+        durationMs: performance.now() - startedAt,
+        success: true
+      });
+    } catch (error) {
+      showKnowledgeError(error.message);
+      skillResultContent.textContent = "The skill did not produce a usable result.";
+      recordLocalMetric({
+        name: "skill_failed",
+        skillId,
+        provider: selectedProvider,
+        durationMs: performance.now() - startedAt,
+        success: false
+      });
+    } finally {
+      if (activeRequestId === taskId) {
+        activeRequestId = null;
+        activeKnowledgeSkillId = "";
+        setProcessingState(false);
+        scheduleResourceRelease();
+      }
+    }
+  }
+
+  function getKnowledgeSkillSettings(skillId, value) {
+    const normalized = String(value || "").trim();
+    const defaults = {
+      quiz: ["mode", "learning"],
+      explain: ["level", "beginner"],
+      summarize: ["style", "brief"],
+      extract: ["target", "facts"],
+      rewrite: ["tone", "professional"],
+      translate: ["language", "Vietnamese"],
+      ask: ["question", "What are the key points?"],
+      "research-brief": ["objective", "Summarize the evidence and open questions."],
+      "decision-matrix": ["criteria", "Cost, quality, risk, and time"],
+      "action-checklist": ["objective", "Create a manual review checklist."]
+    };
+    const [key, fallback] = defaults[skillId] || ["objective", ""];
+    return { [key]: normalized || fallback };
+  }
+
+  function renderStreamingSkillText(text) {
+    skillResultContent.replaceChildren(renderMarkdown(text));
+  }
+
+  function renderActionProposal(proposal) {
+    const container = createElement("div", "qb-action-proposal");
+    container.append(
+      createElement("div", "qb-action-title", proposal.title),
+      createElement("div", "qb-action-summary", proposal.summary)
+    );
+    const steps = createElement("ol", "qb-action-steps");
+    for (const step of proposal.steps) {
+      const item = document.createElement("li");
+      item.textContent = `${step.label}${step.value ? `: ${step.value}` : ""} (${step.risk} risk)`;
+      steps.append(item);
+    }
+    container.append(steps);
+    if (proposal.risks.length) {
+      container.append(
+        createElement(
+          "div",
+          "qb-action-risks",
+          `Risks to review: ${proposal.risks.join("; ")}`
+        )
+      );
+    }
+    const notice = createElement(
+      "div",
+      "qb-action-notice",
+      "Review only. QuizBuddy Labs will not click, submit, pay, or send anything."
+    );
+    const actions = createElement("div", "qb-action-review-actions");
+    const accept = createElement("button", "qb-action-accept", "Accept Draft");
+    const reject = createElement("button", "qb-action-reject", "Reject");
+    accept.addEventListener("click", () =>
+      reviewActionProposal("accepted", notice, actions)
+    );
+    reject.addEventListener("click", () =>
+      reviewActionProposal("rejected", notice, actions)
+    );
+    actions.append(accept, reject);
+    container.append(notice, actions);
+    skillResultContent.replaceChildren(container);
+  }
+
+  function reviewActionProposal(status, notice, actions) {
+    if (!currentSkillResult?.actionProposal) return;
+    currentSkillResult.actionProposal = {
+      ...currentSkillResult.actionProposal,
+      status
+    };
+    notice.textContent =
+      status === "accepted"
+        ? "Draft accepted for manual use. No website action was executed."
+        : "Draft rejected. No website action was executed.";
+    actions.remove();
+  }
+
+  function renderSkillSourceRefs(sourceRefs, warnings = []) {
+    skillResultMeta.replaceChildren();
+    if (warnings.length) {
+      skillResultMeta.append(
+        createElement("div", "qb-source-warning", warnings.join(" "))
+      );
+    }
+    if (!sourceRefs.length) {
+      skillResultMeta.append(
+        createElement("div", "", "No explicit source references were returned.")
+      );
+      return;
+    }
+    const sourceById = new Map(
+      knowledgeContexts.map((context) => [context.id, context])
+    );
+    const label = createElement("span", "", "Verified sources: ");
+    skillResultMeta.append(label);
+    for (const sourceId of sourceRefs) {
+      const context = sourceById.get(sourceId);
+      if (!context) continue;
+      const button = createElement(
+        "button",
+        "qb-source-ref",
+        context.title || sourceId
+      );
+      button.type = "button";
+      button.addEventListener("click", () => setKnowledgeContext(context));
+      skillResultMeta.append(button);
+    }
+  }
+
+  async function saveCurrentArtifact() {
+    if (!currentKnowledgeContext || !currentSkillResult) return;
+    try {
+      await ensureCurrentWorkspace();
+      const resultContexts = ([
+        "compare-sources",
+        "agreements-contradictions",
+        "research-brief",
+        "decision-matrix"
+      ].includes(currentSkillResult.skillId)
+        ? knowledgeContexts
+        : [currentKnowledgeContext]
+      ).map((item) => stripTransientContext(item));
+      const artifact = createArtifact({
+        workspaceId: currentWorkspace.id,
+        skillId: currentSkillResult.skillId,
+        title: currentSkillResult.title,
+        content: currentSkillResult.content,
+        format: currentSkillResult.format,
+        sourceRefs: resultContexts.map((item) => item.id),
+        provider: selectedProvider,
+        metadata: {
+          verifiedSourceRefs: currentSkillResult.sourceRefs || [],
+          invalidSourceRefs: currentSkillResult.invalidSourceRefs || []
+        }
+      });
+      currentWorkspace = createWorkspace({
+        ...currentWorkspace,
+        contextIds: [
+          ...currentWorkspace.contextIds,
+          ...resultContexts.map((item) => item.id)
+        ],
+        artifactIds: [...currentWorkspace.artifactIds, artifact.id],
+        updatedAt: new Date().toISOString()
+      });
+
+      await Promise.all([
+        ...resultContexts.map((context) =>
+          workspaceStore.put("contexts", context)
+        ),
+        workspaceStore.put("artifacts", artifact),
+        workspaceStore.put("workspaces", currentWorkspace)
+      ]);
+      saveArtifactButton.disabled = true;
+      saveArtifactButton.textContent = "Saved";
+      knowledgeStatus.textContent = "Artifact saved to the local Library.";
+      recordLocalMetric({
+        name: "artifact_saved",
+        skillId: artifact.skillId,
+        provider: artifact.provider,
+        success: true
+      });
+    } catch (error) {
+      showKnowledgeError(`Could not save artifact: ${error.message}`);
+    }
+  }
+
+  async function addCurrentSourceToWorkspace() {
+    if (!currentKnowledgeContext?.text.trim()) return;
+    try {
+      syncKnowledgeContextEditor();
+      await ensureCurrentWorkspace();
+      const context = stripTransientContext(currentKnowledgeContext);
+      currentWorkspace = createWorkspace({
+        ...currentWorkspace,
+        contextIds: [...currentWorkspace.contextIds, context.id],
+        updatedAt: new Date().toISOString()
+      });
+      await Promise.all([
+        workspaceStore.put("contexts", context),
+        workspaceStore.put("workspaces", currentWorkspace)
+      ]);
+      addSourceButton.textContent = "Source Added";
+      knowledgeStatus.textContent = `${currentWorkspace.contextIds.length} source(s) are available in this workspace across tabs.`;
+    } catch (error) {
+      showKnowledgeError(`Could not add source: ${error.message}`);
+    }
+  }
+
+  async function ensureCurrentWorkspace() {
+    if (currentWorkspace) {
+      const latest = await workspaceStore.get(
+        "workspaces",
+        currentWorkspace.id
+      );
+      if (latest) currentWorkspace = latest;
+      return currentWorkspace;
+    }
+    currentWorkspace = createWorkspace({
+      title:
+        currentKnowledgeContext?.source?.pageTitle || "Knowledge workspace"
+    });
+    await workspaceStore.put("workspaces", currentWorkspace);
+    if (retentionPolicy !== "session") {
+      await chrome.storage.local.set({
+        [ACTIVE_WORKSPACE_KEY]: currentWorkspace.id
+      });
+    }
+    return currentWorkspace;
+  }
+
+  async function renderLibrary() {
+    try {
+      const workspaces = (await workspaceStore.getAll("workspaces")).filter(
+        (item) => item.id !== "__schema__"
+      );
+      workspacePicker.replaceChildren(
+        ...workspaces.map((workspace) => {
+          const option = document.createElement("option");
+          option.value = workspace.id;
+          option.textContent = workspace.title;
+          return option;
+        })
+      );
+      if (currentWorkspace) workspacePicker.value = currentWorkspace.id;
+      const artifacts = searchWorkspaceRecords(
+        (await workspaceStore.getAll("artifacts")).filter(
+          (item) => item.id !== "__schema__"
+        ).filter(
+          (item) =>
+            !currentWorkspace || item.workspaceId === currentWorkspace.id
+        ),
+        librarySearch.value
+      );
+      const workspaceContextIds = new Set(currentWorkspace?.contextIds || []);
+      const contexts = searchWorkspaceRecords(
+        (await workspaceStore.getAll("contexts")).filter(
+          (item) => !currentWorkspace || workspaceContextIds.has(item.id)
+        ),
+        librarySearch.value
+      );
+      libraryList.replaceChildren();
+      if (!artifacts.length && !contexts.length) {
+        libraryList.append(
+          createElement("div", "qb-library-empty", "No saved sources or artifacts yet.")
+        );
+        return;
+      }
+      if (contexts.length) {
+        libraryList.append(
+          createElement("div", "qb-library-group-title", "Sources")
+        );
+      }
+      for (const context of contexts) {
+        const item = createElement("article", "qb-library-item");
+        const heading = createElement("div", "qb-library-item-heading");
+        heading.append(
+          createElement("div", "qb-library-item-title", context.title),
+          createElement("div", "qb-library-item-date", context.type)
+        );
+        const preview = createElement(
+          "div",
+          "qb-library-item-preview",
+          context.text.slice(0, 320)
+        );
+        const actions = createElement("div", "qb-library-item-actions");
+        for (const [label, handler] of [
+          ["Continue", () => continueFromContext(context)],
+          ["Delete", () => deleteContext(context)]
+        ]) {
+          const button = createElement("button", "qb-library-item-button", label);
+          button.type = "button";
+          button.addEventListener("click", handler);
+          actions.append(button);
+        }
+        item.append(heading, preview, actions);
+        libraryList.append(item);
+      }
+      if (artifacts.length) {
+        libraryList.append(
+          createElement("div", "qb-library-group-title", "Artifacts")
+        );
+      }
+      for (const artifact of artifacts) {
+        const item = createElement("article", "qb-library-item");
+        const heading = createElement("div", "qb-library-item-heading");
+        heading.append(
+          createElement("div", "qb-library-item-title", artifact.title),
+          createElement(
+            "div",
+            "qb-library-item-date",
+            new Date(artifact.updatedAt).toLocaleString()
+          )
+        );
+        const preview = createElement(
+          "div",
+          "qb-library-item-preview",
+          artifact.content.slice(0, 320)
+        );
+        const actions = createElement("div", "qb-library-item-actions");
+        for (const [label, handler] of [
+          ["Continue", () => continueFromArtifact(artifact)],
+          [artifact.pinned ? "Unpin" : "Pin", () => toggleArtifactPin(artifact)],
+          ["Rename", () => renameArtifact(artifact)],
+          ["Duplicate", () => duplicateArtifact(artifact)],
+          ["Delete", () => deleteArtifact(artifact)]
+        ]) {
+          const button = createElement("button", "qb-library-item-button", label);
+          button.type = "button";
+          button.addEventListener("click", handler);
+          actions.append(button);
+        }
+        item.append(heading, preview, actions);
+        libraryList.append(item);
+      }
+    } catch (error) {
+      libraryList.replaceChildren(
+        createElement("div", "qb-knowledge-error", error.message)
+      );
+    }
+  }
+
+  async function selectWorkspace() {
+    const workspace = await workspaceStore.get(
+      "workspaces",
+      workspacePicker.value
+    );
+    if (!workspace) return;
+    currentWorkspace = workspace;
+    knowledgeContexts = (
+      await Promise.all(
+        workspace.contextIds.map((id) => workspaceStore.get("contexts", id))
+      )
+    ).filter(Boolean);
+    if (retentionPolicy !== "session") {
+      await chrome.storage.local.set({
+        [ACTIVE_WORKSPACE_KEY]: workspace.id
+      });
+    }
+    renderLibrary();
+  }
+
+  async function createNewWorkspace() {
+    const title = window.prompt("Workspace name", "New workspace")?.trim();
+    if (!title) return;
+    currentWorkspace = createWorkspace({ title });
+    knowledgeContexts = [];
+    await workspaceStore.put("workspaces", currentWorkspace);
+    if (retentionPolicy !== "session") {
+      await chrome.storage.local.set({
+        [ACTIVE_WORKSPACE_KEY]: currentWorkspace.id
+      });
+    }
+    renderLibrary();
+  }
+
+  async function toggleArtifactPin(artifact) {
+    await workspaceStore.put("artifacts", {
+      ...artifact,
+      pinned: !artifact.pinned,
+      updatedAt: new Date().toISOString()
+    });
+    renderLibrary();
+  }
+
+  function continueFromArtifact(artifact) {
+    setKnowledgeContext({
+      type: "artifact",
+      title: artifact.title,
+      text: artifact.content,
+      source: {
+        capturedAt: artifact.updatedAt || artifact.createdAt
+      },
+      metadata: {
+        artifactId: artifact.id,
+        sourceRefs: artifact.sourceRefs || []
+      }
+    });
+    switchWorkspaceTab("capture");
+  }
+
+  function continueFromContext(context) {
+    setKnowledgeContext(context);
+    switchWorkspaceTab("capture");
+  }
+
+  async function deleteContext(context) {
+    const artifacts = await workspaceStore.getAll("artifacts");
+    await Promise.all(
+      artifacts
+        .filter((artifact) => artifact.sourceRefs?.includes(context.id))
+        .map((artifact) =>
+          workspaceStore.put("artifacts", {
+            ...artifact,
+            sourceRefs: artifact.sourceRefs.filter((id) => id !== context.id),
+            updatedAt: new Date().toISOString()
+          })
+        )
+    );
+    await workspaceStore.delete("contexts", context.id);
+    if (currentWorkspace) {
+      currentWorkspace = createWorkspace({
+        ...currentWorkspace,
+        contextIds: currentWorkspace.contextIds.filter(
+          (id) => id !== context.id
+        ),
+        updatedAt: new Date().toISOString()
+      });
+      await workspaceStore.put("workspaces", currentWorkspace);
+    }
+    knowledgeContexts = knowledgeContexts.filter(
+      (item) => item.id !== context.id
+    );
+    renderLibrary();
+  }
+
+  async function renameArtifact(artifact) {
+    const title = window.prompt("Artifact title", artifact.title)?.trim();
+    if (!title) return;
+    await workspaceStore.put("artifacts", {
+      ...artifact,
+      title: title.slice(0, 160),
+      updatedAt: new Date().toISOString()
+    });
+    renderLibrary();
+  }
+
+  async function duplicateArtifact(artifact) {
+    const duplicate = createArtifact({
+      ...artifact,
+      id: "",
+      title: `${artifact.title} copy`,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    });
+    await workspaceStore.put("artifacts", duplicate);
+    renderLibrary();
+  }
+
+  async function deleteArtifact(artifact) {
+    await workspaceStore.delete("artifacts", artifact.id);
+    renderLibrary();
+  }
+
+  async function updateRetentionPolicy() {
+    retentionPolicy = retentionPolicySelect.value;
+    await chrome.storage.local.set({ [RETENTION_POLICY_KEY]: retentionPolicy });
+    if (retentionPolicy === "session") {
+      workspaceStore = new WorkspaceStore({ sessionOnly: true });
+    } else {
+      workspaceStore = createPersistentWorkspaceClient();
+      await workspaceStore.applyRetention(retentionPolicy);
+    }
+    currentWorkspace = null;
+    renderLibrary();
+  }
+
+  async function exportCurrentWorkspace() {
+    const [workspaces, contexts, artifacts, memories, customSkills] =
+      await Promise.all([
+        workspaceStore.getAll("workspaces"),
+        workspaceStore.getAll("contexts"),
+        workspaceStore.getAll("artifacts"),
+        workspaceStore.getAll("memories"),
+        workspaceStore.getAll("customSkills")
+      ]);
+    const bundle = exportWorkspaceBundle({
+      workspaces: workspaces.filter((item) => item.id !== "__schema__"),
+      contexts,
+      artifacts,
+      memories,
+      customSkills
+    });
+    recordLocalMetric({
+      name: "workspace_exported",
+      provider: selectedProvider,
+      success: true
+    });
+    downloadTextFile(
+      `quizbuddy-labs-${new Date().toISOString().slice(0, 10)}.json`,
+      JSON.stringify(bundle, null, 2),
+      "application/json"
+    );
+    if (currentWorkspace) {
+      const markdown = toMarkdownExport(
+        currentWorkspace,
+        contexts,
+        artifacts.filter((item) => item.workspaceId === currentWorkspace.id)
+      );
+      downloadTextFile("quizbuddy-labs-workspace.md", markdown, "text/markdown");
+    }
+  }
+
+  async function importWorkspaceFile() {
+    const [file] = libraryImportInput.files || [];
+    libraryImportInput.value = "";
+    if (!file) return;
+    try {
+      const bundle = importWorkspaceBundle(JSON.parse(await file.text()));
+      for (const [storeName, records] of Object.entries({
+        workspaces: bundle.workspaces,
+        contexts: bundle.contexts,
+        artifacts: bundle.artifacts,
+        memories: bundle.memories,
+        customSkills: bundle.customSkills
+      })) {
+        for (const record of records) {
+          if (record.id) await workspaceStore.put(storeName, record);
+        }
+      }
+      renderLibrary();
+    } catch (error) {
+      libraryList.prepend(
+        createElement(
+          "div",
+          "qb-knowledge-error",
+          `Import failed: ${error.message}`
+        )
+      );
+    }
+  }
+
+  function downloadTextFile(filename, content, type) {
+    const url = URL.createObjectURL(new Blob([content], { type }));
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    anchor.click();
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function createPersistentWorkspaceClient() {
+    const run = async (operation, payload = {}) => {
+      const response = await chrome.runtime.sendMessage({
+        type: "QB_WORKSPACE_OP",
+        operation,
+        ...payload
+      });
+      if (!response?.ok) {
+        throw new Error(response?.error || "Workspace operation failed.");
+      }
+      return response.result;
+    };
+    return {
+      put: (storeName, record) => run("put", { storeName, record }),
+      get: (storeName, id) => run("get", { storeName, id }),
+      getAll: (storeName) => run("getAll", { storeName }),
+      delete: (storeName, id) => run("delete", { storeName, id }),
+      clearAll: () => run("clearAll"),
+      applyRetention: (policy) => run("applyRetention", { policy })
+    };
+  }
+
+  function recordLocalMetric(input) {
+    const event = createMetricEvent(input);
+    workspaceStore.put("metrics", event).catch(() => {});
+  }
+
+  async function clearWorkspaceData() {
+    if (!window.confirm("Delete all locally saved QuizBuddy Labs workspace data?")) {
+      return;
+    }
+    await workspaceStore.clearAll();
+    currentWorkspace = null;
+    renderLibrary();
+  }
+
+  async function saveKnowledgeProfile() {
+    userProfile = {
+      language: profileLanguage.value.trim().slice(0, 100),
+      occupation: profileOccupation.value.trim().slice(0, 100),
+      expertise: profileExpertise.value.trim().slice(0, 100),
+      tone: profileTone.value.trim().slice(0, 100),
+      format: profileFormat.value.trim().slice(0, 100)
+    };
+    await chrome.storage.local.set({ [PROFILE_KEY]: userProfile });
+    knowledgeStatus.textContent = "Local profile saved.";
+  }
+
+  function applyKnowledgeProfileToUI() {
+    profileLanguage.value = userProfile.language || "";
+    profileOccupation.value = userProfile.occupation || "";
+    profileExpertise.value = userProfile.expertise || "";
+    profileTone.value = userProfile.tone || "";
+    profileFormat.value = userProfile.format || "";
+  }
+
+  async function saveExplicitMemory() {
+    const label = memoryLabelInput.value.trim();
+    const value = memoryValueInput.value.trim();
+    if (!label || !value) {
+      showKnowledgeError("Memory requires both a label and a value.");
+      return;
+    }
+    const now = new Date().toISOString();
+    await workspaceStore.put("memories", {
+      id: `mem_${crypto.randomUUID()}`,
+      label: label.slice(0, 120),
+      value: value.slice(0, 2000),
+      enabled: true,
+      createdAt: now,
+      updatedAt: now
+    });
+    memoryLabelInput.value = "";
+    memoryValueInput.value = "";
+    await renderMemories();
+  }
+
+  async function renderMemories() {
+    const memories = await workspaceStore.getAll("memories");
+    memoryList.replaceChildren();
+    for (const memory of memories) {
+      const row = createElement("div", "qb-memory-item");
+      const text = createElement(
+        "div",
+        "qb-memory-text",
+        `${memory.label}: ${memory.value}`
+      );
+      const toggle = createElement(
+        "button",
+        "qb-library-item-button",
+        memory.enabled === false ? "Enable" : "Disable"
+      );
+      toggle.addEventListener("click", async () => {
+        await workspaceStore.put("memories", {
+          ...memory,
+          enabled: memory.enabled === false,
+          updatedAt: new Date().toISOString()
+        });
+        renderMemories();
+      });
+      const edit = createElement("button", "qb-library-item-button", "Edit");
+      edit.addEventListener("click", async () => {
+        const value = window.prompt("Memory value", memory.value)?.trim();
+        if (!value) return;
+        await workspaceStore.put("memories", {
+          ...memory,
+          value: value.slice(0, 2000),
+          updatedAt: new Date().toISOString()
+        });
+        renderMemories();
+      });
+      const remove = createElement("button", "qb-library-item-button", "Delete");
+      remove.addEventListener("click", async () => {
+        await workspaceStore.delete("memories", memory.id);
+        renderMemories();
+      });
+      row.append(text, toggle, edit, remove);
+      memoryList.append(row);
+    }
+  }
+
+  async function saveCustomSkill() {
+    try {
+      const skill = normalizeCustomSkill({
+        id: customSkillNameInput.value,
+        name: customSkillNameInput.value,
+        description: customSkillDescriptionInput.value,
+        instruction: customSkillInstructionInput.value,
+        acceptedContextTypes: customSkillInputSelect.value.split(","),
+        outputType: customSkillOutputSelect.value
+      });
+      await workspaceStore.put("customSkills", skill);
+      customSkills = await workspaceStore.getAll("customSkills");
+      rebuildSkillRegistry();
+      customSkillNameInput.value = "";
+      customSkillDescriptionInput.value = "";
+      customSkillInstructionInput.value = "";
+      knowledgeStatus.textContent = `${skill.name} added as a declarative local skill.`;
+    } catch (error) {
+      showKnowledgeError(error.message);
+    }
+  }
+
+  function rebuildSkillRegistry() {
+    skillRegistry = createSkillRegistry(customSkills);
+    const selectedSkillId = skillSelect.value;
+    skillSelect.replaceChildren(
+      ...skillRegistry.list().map((skill) => {
+        const option = document.createElement("option");
+        option.value = skill.id;
+        option.textContent = skill.custom ? `${skill.name} (Custom)` : skill.name;
+        return option;
+      })
+    );
+    if (skillRegistry.get(selectedSkillId)) {
+      skillSelect.value = selectedSkillId;
+    }
+    updateSkillSettingHint();
+  }
+
+  function showKnowledgeError(message) {
+    knowledgeError.textContent = message;
+    knowledgeError.classList.remove("qb-hidden");
+  }
+
+  function clearKnowledgeError() {
+    knowledgeError.textContent = "";
+    knowledgeError.classList.add("qb-hidden");
   }
 
   async function startCropMode() {
@@ -839,6 +2204,8 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
       "";
     lastAnalysisContext = {
       ocrText: sourceText,
+      croppedImageDataUrl: response.croppedImageDataUrl || "",
+      inputMode: getActiveAnalysisInputMode(),
       analysisResult: response.aiResult,
       aiResult: response.aiResult,
       numberedLines: numberOcrLines(sourceText),
@@ -902,11 +2269,7 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
     }
 
     if (result.followupText && followupStreamingBubble) {
-      if (containsLatexMarkers(result.followupText)) {
-        followupStreamingBubble.replaceChildren(renderTextWithFormulas(result.followupText));
-      } else {
-        followupStreamingBubble.textContent = result.followupText;
-      }
+      followupStreamingBubble.replaceChildren(renderMarkdown(result.followupText));
       followupStreamingBubble.classList.remove("qb-followup-pending");
     }
   }
@@ -1296,6 +2659,14 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
     recropButton.disabled = processing || !lastScreenshotAvailable;
     cancelButton.classList.toggle("qb-hidden", !processing);
     cancelButton.disabled = !processing;
+    chatSendButton.disabled = processing || !modelReady;
+    chatAttachButton.disabled = processing || selectedProvider !== "openai";
+    chatClearButton.disabled = processing;
+    captureSelectionButton.disabled = processing;
+    capturePageButton.disabled = processing;
+    runSkillButton.disabled =
+      processing || !currentKnowledgeContext?.text?.trim();
+    saveArtifactButton.disabled = processing || !currentSkillResult;
   }
 
   async function ensureModelOnboarding() {
@@ -1311,6 +2682,7 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
       modelActions.classList.add("qb-hidden");
       localSettingsGroup.classList.add("qb-hidden");
       openaiSettingsGroup.classList.remove("qb-hidden");
+      updateChatProviderState();
       return;
     }
 
@@ -1425,6 +2797,7 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
     modelLaterButton.classList.add("qb-hidden");
     modelDeleteButton.classList.remove("qb-hidden");
     modelCard.classList.add("qb-model-card-ready");
+    updateChatProviderState();
     setStatus("Ready to crop a question.");
   }
 
@@ -1515,9 +2888,13 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
           PROVIDER_KEY,
           OPENAI_BASE_URL_KEY,
           OPENAI_API_KEY_KEY,
-          OPENAI_MODEL_KEY
+          OPENAI_MODEL_KEY,
+          RETENTION_POLICY_KEY,
+          ACTIVE_WORKSPACE_KEY,
+          PROFILE_KEY,
+          SIDEBAR_WIDTH_KEY
         ])
-        .then((storage) => {
+        .then(async (storage) => {
           selectedModelId = getModelProfile(
             storage[MODEL_SELECTION_KEY]
           ).id;
@@ -1544,6 +2921,35 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
           selectedOpenaiBaseUrl = storage[OPENAI_BASE_URL_KEY] || "https://api.openai.com/v1";
           selectedOpenaiApiKey = storage[OPENAI_API_KEY_KEY] || "";
           selectedOpenaiModel = storage[OPENAI_MODEL_KEY] || "gpt-4o-mini";
+          retentionPolicy = ["session", "7-days", "30-days", "forever"].includes(
+            storage[RETENTION_POLICY_KEY]
+          )
+            ? storage[RETENTION_POLICY_KEY]
+            : "30-days";
+          retentionPolicySelect.value = retentionPolicy;
+          workspaceStore =
+            retentionPolicy === "session"
+              ? new WorkspaceStore({ sessionOnly: true })
+              : createPersistentWorkspaceClient();
+          if (retentionPolicy !== "session") {
+            await workspaceStore.applyRetention(retentionPolicy);
+          }
+          if (storage[ACTIVE_WORKSPACE_KEY]) {
+            currentWorkspace = await workspaceStore.get(
+              "workspaces",
+              storage[ACTIVE_WORKSPACE_KEY]
+            );
+          }
+          userProfile =
+            storage[PROFILE_KEY] && typeof storage[PROFILE_KEY] === "object"
+              ? storage[PROFILE_KEY]
+              : {};
+          sidebarWidth = normalizeSidebarWidth(storage[SIDEBAR_WIDTH_KEY]);
+          applySidebarWidth();
+          applyKnowledgeProfileToUI();
+          customSkills = await workspaceStore.getAll("customSkills");
+          rebuildSkillRegistry();
+          await renderMemories();
           
           modelSelect.value = selectedModelId;
           ocrLanguageSelect.value = selectedOcrLanguage;
@@ -1575,7 +2981,7 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
 
     const subtitle = sidebar.querySelector(".qb-subtitle");
     if (subtitle) {
-      subtitle.textContent = isLocal ? "Local question analysis" : "API question analysis";
+      subtitle.textContent = isLocal ? "Local-first Knowledge Copilot" : "API Knowledge Copilot";
     }
 
     if (isLocal) {
@@ -1596,6 +3002,7 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
       setStatus("Ready to crop a question.");
     }
     applyAnalysisInputMode();
+    updateChatProviderState();
   }
 
   async function onProviderChange() {
@@ -1620,6 +3027,7 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
     if (selectedProvider === "openai") {
       modelCardText.textContent = `Using API model: ${selectedOpenaiModel}`;
     }
+    updateChatProviderState();
     setStatus("API settings saved.");
   }
 
@@ -1775,6 +3183,82 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
     return value === "dark" || value === "light" ? value : "system";
   }
 
+  function startSidebarResize(event) {
+    if (event.button !== 0 || window.innerWidth <= 420) return;
+    sidebarResizeState = { pointerId: event.pointerId };
+    sidebarResizeHandle.setPointerCapture(event.pointerId);
+    sidebar.classList.add("qb-sidebar-resizing");
+    event.preventDefault();
+  }
+
+  function resizeSidebar(event) {
+    if (sidebarResizeState?.pointerId !== event.pointerId) return;
+    sidebarWidth = clampSidebarWidth(window.innerWidth - event.clientX);
+    applySidebarWidth();
+  }
+
+  function finishSidebarResize(event) {
+    if (sidebarResizeState?.pointerId !== event.pointerId) return;
+    sidebarResizeState = null;
+    sidebar.classList.remove("qb-sidebar-resizing");
+    if (sidebarResizeHandle.hasPointerCapture(event.pointerId)) {
+      sidebarResizeHandle.releasePointerCapture(event.pointerId);
+    }
+    chrome.storage.local
+      .set({ [SIDEBAR_WIDTH_KEY]: sidebarWidth })
+      .catch(() => {});
+  }
+
+  function resetSidebarWidth() {
+    sidebarWidth = 390;
+    applySidebarWidth();
+    chrome.storage.local
+      .set({ [SIDEBAR_WIDTH_KEY]: sidebarWidth })
+      .catch(() => {});
+  }
+
+  function resizeSidebarWithKeyboard(event) {
+    if (!["ArrowLeft", "ArrowRight", "Home"].includes(event.key)) return;
+    event.preventDefault();
+    if (event.key === "Home") {
+      resetSidebarWidth();
+      return;
+    }
+    sidebarWidth = clampSidebarWidth(
+      sidebarWidth + (event.key === "ArrowLeft" ? 40 : -40)
+    );
+    applySidebarWidth();
+    chrome.storage.local
+      .set({ [SIDEBAR_WIDTH_KEY]: sidebarWidth })
+      .catch(() => {});
+  }
+
+  function applySidebarWidth() {
+    if (window.innerWidth <= 420) {
+      sidebar.style.removeProperty("--qb-sidebar-width");
+      return;
+    }
+    sidebarWidth = clampSidebarWidth(sidebarWidth);
+    sidebar.style.setProperty("--qb-sidebar-width", `${sidebarWidth}px`);
+    sidebarResizeHandle.setAttribute("aria-valuenow", String(sidebarWidth));
+    sidebarResizeHandle.setAttribute("aria-valuemin", "360");
+    sidebarResizeHandle.setAttribute(
+      "aria-valuemax",
+      String(Math.floor(window.innerWidth * 0.92))
+    );
+  }
+
+  function normalizeSidebarWidth(value) {
+    const width = Number(value);
+    return Number.isFinite(width) ? clampSidebarWidth(width) : 390;
+  }
+
+  function clampSidebarWidth(value) {
+    return Math.round(
+      Math.min(Math.max(Number(value) || 390, 340), window.innerWidth * 0.92)
+    );
+  }
+
   async function setFloatingButtonDocked(docked) {
     floatingButtonDocked = Boolean(docked);
     applyFloatingButtonDockState();
@@ -1786,13 +3270,13 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
   function applyFloatingButtonDockState() {
     floatingButton.classList.toggle("qb-floating-docked", floatingButtonDocked);
     floatingButton.title = floatingButtonDocked
-      ? "Expand QuizBuddy AI button"
-      : "Open QuizBuddy AI";
+      ? "Expand QuizBuddy Labs button"
+      : "Open QuizBuddy Labs";
     floatingButton.setAttribute(
       "aria-label",
       floatingButtonDocked
-        ? "Expand QuizBuddy AI button"
-        : "Open QuizBuddy AI"
+        ? "Expand QuizBuddy Labs button"
+        : "Open QuizBuddy Labs"
     );
   }
 
@@ -1962,6 +3446,15 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
   async function cancelActiveTask() {
     const taskId = activeRequestId || modelRequestId;
     if (!taskId) return;
+    if (activeKnowledgeSkillId) {
+      recordLocalMetric({
+        name: "task_cancelled",
+        skillId: activeKnowledgeSkillId,
+        provider: selectedProvider,
+        success: false
+      });
+      activeKnowledgeSkillId = "";
+    }
     activeRequestId = null;
     modelRequestId = null;
     cancelButton.disabled = true;
@@ -1973,6 +3466,11 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
       });
     } catch {
       // The task may have completed while cancellation was requested.
+    }
+    if (chatStreamingBubble) {
+      chatStreamingBubble.classList.remove("qb-chat-message-pending");
+      chatStreamingBubble.textContent = "Response cancelled.";
+      chatStreamingBubble = null;
     }
     setProcessingState(false);
     setStatus("Task cancelled.");
@@ -2040,7 +3538,7 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
         followupStreamingBubble ||
         createElement("div", "qb-followup-message qb-followup-ai");
       reply.classList.remove("qb-followup-pending");
-      reply.replaceChildren(document.createTextNode(response.reply));
+      reply.replaceChildren(renderMarkdown(response.reply));
       if (response.sourceTrace?.length) {
         reply.append(createSourceTrace(response.sourceTrace));
       }
@@ -2061,6 +3559,397 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
         setProcessingState(false);
         scheduleResourceRelease();
       }
+    }
+  }
+
+  async function sendChatMessage() {
+    const text = chatInput.value.trim();
+    if ((!text && !pendingChatImage) || activeRequestId) {
+      return;
+    }
+    if (!modelReady) {
+      showChatError(
+        selectedProvider === "local"
+          ? "Prepare the selected local model before chatting."
+          : "Configure the API provider before chatting."
+      );
+      return;
+    }
+    if (pendingChatImage && selectedProvider !== "openai") {
+      showChatError(
+        "Image attachments require the OpenAI Compatible API provider."
+      );
+      return;
+    }
+
+    clearChatError();
+    cancelScheduledResourceRelease();
+    const userEntry = {
+      role: "user",
+      text,
+      imageDataUrl: pendingChatImage?.dataUrl || "",
+      imageName: pendingChatImage?.name || ""
+    };
+    chatHistory.push(userEntry);
+    chatHistory = chatHistory.slice(-20);
+    appendChatMessage(userEntry);
+    chatInput.value = "";
+    resizeChatInput();
+    clearPendingChatImage();
+
+    chatStreamingBubble = createElement(
+      "div",
+      "qb-chat-message qb-chat-message-assistant qb-chat-message-pending",
+      "Thinking"
+    );
+    chatMessages.append(chatStreamingBubble);
+    scrollChatToBottom();
+
+    activeRequestId = crypto.randomUUID();
+    const taskId = activeRequestId;
+    setProcessingState(true);
+
+    try {
+      const response = await chrome.runtime.sendMessage({
+        type: "QB_CHAT_LOCAL",
+        requestId: taskId,
+        taskId,
+        modelId: selectedModelId,
+        messages: chatHistory.map(({ role, text: messageText, imageDataUrl }) => ({
+          role,
+          text: messageText,
+          imageDataUrl
+        })),
+        provider: selectedProvider,
+        openaiBaseUrl: selectedOpenaiBaseUrl,
+        openaiApiKey: selectedOpenaiApiKey,
+        openaiModel: selectedOpenaiModel
+      });
+      if (activeRequestId !== taskId) return;
+      if (!response?.ok) {
+        if (response?.cancelled) {
+          throw new Error("Chat task was cancelled.");
+        }
+        throw new Error(response?.error || "Could not complete the chat response.");
+      }
+
+      const reply = String(response.reply || "").trim();
+      renderStreamingChatText(reply);
+      chatStreamingBubble?.classList.remove("qb-chat-message-pending");
+      chatHistory.push({ role: "assistant", text: reply, imageDataUrl: "" });
+      chatHistory = chatHistory.slice(-20);
+    } catch (error) {
+      if (chatStreamingBubble) {
+        chatStreamingBubble.classList.remove("qb-chat-message-pending");
+        chatStreamingBubble.textContent = "Could not complete this response.";
+      }
+      showChatError(error.message);
+    } finally {
+      chatStreamingBubble = null;
+      if (activeRequestId === taskId) {
+        activeRequestId = null;
+        setProcessingState(false);
+        scheduleResourceRelease();
+      }
+    }
+  }
+
+  function appendChatMessage({ role, text, imageDataUrl, imageName }) {
+    chatMessages.querySelector(".qb-chat-empty")?.remove();
+    const bubble = createElement(
+      "div",
+      `qb-chat-message ${
+        role === "assistant"
+          ? "qb-chat-message-assistant"
+          : "qb-chat-message-user"
+      }`
+    );
+    if (imageDataUrl) {
+      const image = document.createElement("img");
+      image.className = "qb-chat-message-image";
+      image.src = imageDataUrl;
+      image.alt = imageName || "Attached image";
+      bubble.append(image);
+    }
+    if (text) {
+      const textElement = createElement("div", "qb-chat-message-text");
+      if (role === "assistant") {
+        textElement.append(renderMarkdown(text));
+      } else {
+        textElement.textContent = text;
+      }
+      bubble.append(textElement);
+    }
+    chatMessages.append(bubble);
+    scrollChatToBottom();
+    return bubble;
+  }
+
+  function renderStreamingChatText(text) {
+    if (!chatStreamingBubble) {
+      return;
+    }
+    chatStreamingBubble.classList.remove("qb-chat-message-pending");
+    chatStreamingBubble.replaceChildren(renderMarkdown(text));
+    scrollChatToBottom();
+  }
+
+  function renderMarkdown(markdown) {
+    const fragment = document.createDocumentFragment();
+    const container = createElement("div", "qb-markdown");
+    for (const block of parseMarkdownBlocks(markdown)) {
+      container.append(renderMarkdownBlock(block));
+    }
+    fragment.append(container);
+    return fragment;
+  }
+
+  function renderMarkdownBlock(block) {
+    if (block.type === "heading") {
+      const heading = document.createElement(`h${block.level}`);
+      appendMarkdownInline(heading, block.text);
+      return heading;
+    }
+    if (block.type === "code") {
+      const pre = document.createElement("pre");
+      const code = document.createElement("code");
+      code.textContent = block.text;
+      if (block.language) code.dataset.language = block.language;
+      pre.append(code);
+      return pre;
+    }
+    if (block.type === "rule") {
+      return document.createElement("hr");
+    }
+    if (block.type === "quote") {
+      const quote = document.createElement("blockquote");
+      for (const child of block.children) {
+        quote.append(renderMarkdownBlock(child));
+      }
+      return quote;
+    }
+    if (block.type === "list") {
+      const list = document.createElement(block.ordered ? "ol" : "ul");
+      for (const itemText of block.items) {
+        const item = document.createElement("li");
+        appendMarkdownInline(item, itemText);
+        list.append(item);
+      }
+      return list;
+    }
+    if (block.type === "table") {
+      const wrapper = createElement("div", "qb-markdown-table-wrap");
+      const table = document.createElement("table");
+      const head = document.createElement("thead");
+      const headRow = document.createElement("tr");
+      for (const headerText of block.headers) {
+        const header = document.createElement("th");
+        appendMarkdownInline(header, headerText);
+        headRow.append(header);
+      }
+      head.append(headRow);
+      const body = document.createElement("tbody");
+      for (const row of block.rows) {
+        const tableRow = document.createElement("tr");
+        for (let index = 0; index < block.headers.length; index += 1) {
+          const cell = document.createElement("td");
+          appendMarkdownInline(cell, row[index] || "");
+          tableRow.append(cell);
+        }
+        body.append(tableRow);
+      }
+      table.append(head, body);
+      wrapper.append(table);
+      return wrapper;
+    }
+    const paragraph = document.createElement("p");
+    appendMarkdownInline(paragraph, block.text);
+    return paragraph;
+  }
+
+  function appendMarkdownInline(parent, text) {
+    for (const token of parseMarkdownInline(text)) {
+      if (token.type === "text") {
+        appendTextWithBreaksAndFormulas(parent, token.text);
+        continue;
+      }
+      const element = document.createElement(
+        token.type === "strong"
+          ? "strong"
+          : token.type === "emphasis"
+            ? "em"
+            : token.type === "code"
+              ? "code"
+              : token.href
+                ? "a"
+                : "span"
+      );
+      if (token.type === "link" && token.href) {
+        element.href = token.href;
+        element.target = "_blank";
+        element.rel = "noopener noreferrer";
+      }
+      if (token.type === "code") {
+        element.textContent = token.text;
+      } else {
+        appendTextWithBreaksAndFormulas(element, token.text);
+      }
+      parent.append(element);
+    }
+  }
+
+  function appendTextWithBreaksAndFormulas(parent, text) {
+    const lines = String(text).split("\n");
+    lines.forEach((line, index) => {
+      if (containsLatexMarkers(line)) {
+        parent.append(renderTextWithFormulas(line));
+      } else {
+        parent.append(document.createTextNode(line));
+      }
+      if (index < lines.length - 1) parent.append(document.createElement("br"));
+    });
+  }
+
+  async function onChatFileSelected() {
+    const [file] = chatFileInput.files || [];
+    chatFileInput.value = "";
+    if (!file) return;
+    await attachChatImage(file);
+  }
+
+  async function onChatPaste(event) {
+    const imageItem = [...(event.clipboardData?.items || [])].find((item) =>
+      item.type.startsWith("image/")
+    );
+    if (!imageItem) {
+      return;
+    }
+    event.preventDefault();
+    const file = imageItem.getAsFile();
+    if (file) {
+      await attachChatImage(file, "Pasted image");
+    }
+  }
+
+  async function attachChatImage(file, fallbackName = "") {
+    if (selectedProvider !== "openai") {
+      showChatError(
+        "Switch to OpenAI Compatible API before attaching an image."
+      );
+      return;
+    }
+    if (!/^image\/(?:png|jpeg|webp)$/i.test(file.type)) {
+      showChatError("Use a PNG, JPEG, or WebP image.");
+      return;
+    }
+    if (file.size > 10 * 1024 * 1024) {
+      showChatError("The selected image is larger than 10 MB.");
+      return;
+    }
+
+    try {
+      const dataUrl = await resizeChatImage(file);
+      const imageName = file.name || fallbackName || "Attached image";
+      pendingChatImage = { dataUrl, name: imageName };
+      chatAttachmentImage.src = dataUrl;
+      chatAttachmentName.textContent = imageName;
+      chatAttachment.classList.remove("qb-hidden");
+      clearChatError();
+      chatInput.focus();
+    } catch (error) {
+      showChatError(`Could not attach image: ${error.message}`);
+    }
+  }
+
+  async function resizeChatImage(file) {
+    const sourceUrl = URL.createObjectURL(file);
+    try {
+      const image = await new Promise((resolve, reject) => {
+        const candidate = new Image();
+        candidate.onload = () => resolve(candidate);
+        candidate.onerror = () => reject(new Error("The image could not be read."));
+        candidate.src = sourceUrl;
+      });
+      const maxDimension = 1600;
+      const scale = Math.min(
+        1,
+        maxDimension / Math.max(image.naturalWidth, image.naturalHeight)
+      );
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(image.naturalWidth * scale));
+      canvas.height = Math.max(1, Math.round(image.naturalHeight * scale));
+      const context = canvas.getContext("2d");
+      if (!context) {
+        throw new Error("Canvas is unavailable.");
+      }
+      context.drawImage(image, 0, 0, canvas.width, canvas.height);
+      return canvas.toDataURL("image/jpeg", 0.86);
+    } finally {
+      URL.revokeObjectURL(sourceUrl);
+    }
+  }
+
+  function clearPendingChatImage() {
+    pendingChatImage = null;
+    chatAttachmentImage.removeAttribute("src");
+    chatAttachmentName.textContent = "";
+    chatAttachment.classList.add("qb-hidden");
+  }
+
+  function clearChat() {
+    if (activeRequestId) return;
+    chatHistory = [];
+    chatStreamingBubble = null;
+    clearPendingChatImage();
+    clearChatError();
+    chatMessages.replaceChildren(createChatEmptyState());
+    chatInput.value = "";
+    resizeChatInput();
+    chatInput.focus();
+  }
+
+  function createChatEmptyState() {
+    const empty = createElement("div", "qb-chat-empty");
+    empty.append(
+      createElement("div", "qb-chat-empty-title", "How can I help?"),
+      createElement(
+        "div",
+        "qb-chat-empty-text",
+        "Ask a question or attach an image for the API vision model."
+      )
+    );
+    return empty;
+  }
+
+  function resizeChatInput() {
+    chatInput.style.height = "auto";
+    chatInput.style.height = `${Math.min(chatInput.scrollHeight, 140)}px`;
+  }
+
+  function scrollChatToBottom() {
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+  }
+
+  function showChatError(message) {
+    chatError.textContent = message;
+    chatError.classList.remove("qb-hidden");
+  }
+
+  function clearChatError() {
+    chatError.textContent = "";
+    chatError.classList.add("qb-hidden");
+  }
+
+  function updateChatProviderState() {
+    const supportsImages = selectedProvider === "openai";
+    chatModelLabel.textContent = getActiveModelLabel();
+    chatAttachButton.disabled = !supportsImages || Boolean(activeRequestId);
+    chatAttachButton.title = supportsImages
+      ? "+"
+      : "Image attachments require the API provider";
+    chatSendButton.disabled = Boolean(activeRequestId) || !modelReady;
+    if (!supportsImages && pendingChatImage) {
+      clearPendingChatImage();
     }
   }
 
@@ -2399,12 +4288,15 @@ import { expandFormulasForPrompt } from "../lib/formula-detection.js";
         showError("The re-crop area must be at least 30 × 30 pixels.");
         return;
       }
+      const scaleX = image.naturalWidth / bounds.width;
+      const scaleY = image.naturalHeight / bounds.height;
       closeModal();
       await processRecrop({
-        ...rect,
-        viewportWidth: bounds.width,
-        viewportHeight: bounds.height,
-        devicePixelRatio: 1
+        x: rect.x * scaleX,
+        y: rect.y * scaleY,
+        width: rect.width * scaleX,
+        height: rect.height * scaleY,
+        coordinateSpace: "image-pixels"
       });
     });
   }

@@ -1,7 +1,7 @@
 {
   "name": "quizbuddy-ai",
   "version": "0.9.6",
-  "description": "A privacy-first Chrome extension for local screenshot OCR and WebLLM question analysis.",
+  "description": "A local-first Chrome Knowledge Copilot for capture, transformation, research, and quiz workflows.",
   "private": true,
   "license": "MIT",
   "type": "module",

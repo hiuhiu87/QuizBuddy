@@ -44,6 +44,23 @@ test("calculateCropPixels clamps a selection to image bounds", () => {
   );
 });
 
+test("calculateCropPixels preserves re-crop coordinates in screenshot pixels", () => {
+  assert.deepEqual(
+    calculateCropPixels(
+      {
+        x: 420,
+        y: 260,
+        width: 640,
+        height: 360,
+        coordinateSpace: "image-pixels"
+      },
+      2560,
+      1440
+    ),
+    { sx: 420, sy: 260, sw: 640, sh: 360 }
+  );
+});
+
 test("normalizeOCRText removes OCR spacing noise", () => {
   assert.equal(
     normalizeOCRText(" Question?  \r\n  A. One \n\n\n B. Two "),
@@ -393,6 +410,23 @@ test("parseAIResult recovers essential fields from truncated JSON", () => {
   assert.equal(result.answerLabel, "B");
   assert.equal(result.parseStatus, "recovered");
   assert.equal(result.confidence, "medium");
+});
+
+test("parseAIResult recovers every complete question from a truncated batch", () => {
+  const result = parseAIResult(
+    `{"mode":"quick","questions":[
+      {"questionNumber":1,"questionText":"First","answerSelections":[{"label":"B","text":"Sai"}],"answerText":"Sai","answerLabel":"B","confidence":"high","shortExplanation":"First reason"},
+      {"questionNumber":2,"questionText":"Second","answerSelections":[{"label":"A","text":"Đúng"}],"answerText":"Đúng","answerLabel":"A","confidence":"high","shortExplanation":"Second reason"},
+      {"questionNumber":3,"questionText":"Incomplete"`,
+    "",
+    { requestedMode: "quick", trustModelSelections: true }
+  );
+
+  assert.equal(result.parseStatus, "recovered");
+  assert.equal(result.questionCount, 2);
+  assert.equal(result.questions[0].answerText, "Sai");
+  assert.equal(result.questions[1].answerText, "Đúng");
+  assert.equal(result.questions[0].confidence, "medium");
 });
 
 test("parseAIResult normalizes visible option analysis", () => {

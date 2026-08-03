@@ -58,6 +58,13 @@ import {
   normalizeFormulaLatex,
   calculateFormulaConfidence
 } from "./lib/formula-detection.js";
+import { validateRunSkillTask } from "./lib/knowledge-contracts.js";
+import {
+  createSkillRegistry,
+  extractSourceCitations
+} from "./lib/skill-registry.js";
+import { WorkspaceStore } from "./lib/workspace-store.js";
+import { parseActionProposal } from "./lib/action-proposal.js";
 
 const MIN_OCR_TEXT_LENGTH = 8;
 const ANALYSIS_TIMEOUT_MS = 60000;
@@ -78,6 +85,7 @@ let lastScreenshotDataUrl = null;
 let lastModelLoadStatus = "not-loaded";
 let lastModelError = "";
 const cancelledTaskIds = new Set();
+const extensionWorkspaceStore = new WorkspaceStore();
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "QB_OFFSCREEN_MODEL_STATUS") {
@@ -178,6 +186,46 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           cancelled: isTaskCancelled(message.taskId || message.requestId),
           stage: "followup",
           error: error.message || "Could not answer the follow-up."
+        });
+      });
+    return true;
+  }
+
+  if (message.type === "QB_OFFSCREEN_CHAT") {
+    runChat(message)
+      .then(sendResponse)
+      .catch((error) => {
+        sendResponse({
+          ok: false,
+          cancelled: isTaskCancelled(message.taskId || message.requestId),
+          stage: "chat",
+          error: error.message || "Could not complete the chat response."
+        });
+      });
+    return true;
+  }
+
+  if (message.type === "QB_OFFSCREEN_RUN_SKILL") {
+    runKnowledgeSkill({ ...message, type: "QB_RUN_SKILL" })
+      .then(sendResponse)
+      .catch((error) => {
+        sendResponse({
+          ok: false,
+          cancelled: isTaskCancelled(message.taskId || message.requestId),
+          stage: "skill",
+          error: error.message || "Could not run the selected skill."
+        });
+      });
+    return true;
+  }
+
+  if (message.type === "QB_OFFSCREEN_WORKSPACE_OP") {
+    runWorkspaceOperation(message)
+      .then(sendResponse)
+      .catch((error) => {
+        sendResponse({
+          ok: false,
+          error: error.message || "Could not access the local workspace."
         });
       });
     return true;
@@ -404,7 +452,8 @@ async function processScreenshotLocally({
           analyzeAnyway,
           openaiBaseUrl,
           openaiApiKey,
-          openaiModel
+          openaiModel,
+          provider
         });
         timings.webllmMs = Math.round(performance.now() - webllmStartedAt);
         timings.totalMs = Math.round(performance.now() - startedAt);
@@ -870,6 +919,320 @@ async function consumeFollowUpStream(stream, engine, taskId) {
     );
   }
   return content;
+}
+
+async function runChat({
+  requestId,
+  taskId = requestId,
+  modelId,
+  messages,
+  provider,
+  openaiBaseUrl,
+  openaiApiKey,
+  openaiModel
+}) {
+  const id = taskId || requestId;
+  activeRequestId = id;
+  cancelledTaskIds.delete(id);
+
+  try {
+    const normalizedMessages = normalizeChatMessages(messages);
+    if (!normalizedMessages.length) {
+      throw new Error("Enter a message before sending.");
+    }
+
+    const hasImage = normalizedMessages.some((message) => message.imageDataUrl);
+    if (hasImage && provider !== "openai") {
+      throw new Error(
+        "Image attachments require the OpenAI Compatible API provider."
+      );
+    }
+
+    reportProgress("chat", "Thinking...", 0.2);
+    let stream;
+    let engine = null;
+    const systemMessage = {
+      role: "system",
+      content:
+        "You are QuizBuddy Labs, a concise and accurate knowledge copilot. Answer naturally in the user's language. Use attached images when present. Do not claim to see content that is not visible."
+    };
+
+    if (provider === "openai") {
+      const apiMessages = [
+        systemMessage,
+        ...normalizedMessages.map(toOpenAIChatMessage)
+      ];
+      stream = callOpenAICompatibleAPIStream(
+        apiMessages,
+        0.3,
+        1200,
+        null,
+        { openaiBaseUrl, openaiApiKey, openaiModel },
+        id
+      );
+    } else {
+      const profile = getModelProfile(modelId);
+      if (!(await hasModelInCache(profile.id, getWebLLMAppConfig()))) {
+        throw new Error("The selected local model is not available.");
+      }
+      engine = await getWebLLMEngine(profile.id);
+      stream = await engine.chat.completions.create({
+        messages: [
+          systemMessage,
+          ...normalizedMessages.map(({ role, text }) => ({
+            role,
+            content: text
+          }))
+        ],
+        temperature: 0.3,
+        max_tokens: 900,
+        stream: true,
+        ...getNoThinkingExtraBody()
+      });
+    }
+
+    const reply = await consumePlainTextStream(stream, engine, id);
+    logRawAIResponse("chat", reply);
+    throwIfCancelled(id);
+    reportProgress("done", "Chat response ready.", 1);
+    return { ok: true, reply };
+  } finally {
+    activeRequestId = null;
+  }
+}
+
+async function runKnowledgeSkill(message) {
+  const task = validateRunSkillTask(message);
+  activeRequestId = task.taskId;
+  cancelledTaskIds.delete(task.taskId);
+
+  try {
+    const { contexts, omittedSourceIds } = prepareSkillContexts(task.context);
+    const registry = createSkillRegistry(message.customSkills || []);
+    const skill = registry.get(task.skillId);
+    if (!skill) {
+      throw new Error(`Unknown skill: ${task.skillId}`);
+    }
+    const messages = registry.run(
+      task.skillId,
+      contexts,
+      task.settings,
+      task.profile
+    );
+
+    reportProgress("skill", `Running ${skill.name}...`, 0.2);
+    let stream;
+    let engine = null;
+    if (task.provider === "openai") {
+      stream = callOpenAICompatibleAPIStream(
+        messages,
+        0.2,
+        1600,
+        null,
+        task,
+        task.taskId
+      );
+    } else {
+      const profile = getModelProfile(task.modelId);
+      if (!(await hasModelInCache(profile.id, getWebLLMAppConfig()))) {
+        throw new Error("The selected local model is not available.");
+      }
+      engine = await getWebLLMEngine(profile.id);
+      stream = await engine.chat.completions.create({
+        messages,
+        temperature: 0.2,
+        max_tokens: 1400,
+        stream: true,
+        ...getNoThinkingExtraBody()
+      });
+    }
+
+    const content = await consumePlainTextStream(
+      stream,
+      engine,
+      task.taskId,
+      "skillText"
+    );
+    const sourceIds = contexts.map((item) => item.id);
+    const citations = extractSourceCitations(content, sourceIds);
+    let actionProposal = null;
+    if (skill.id === "action-checklist") {
+      actionProposal = parseActionProposal(content);
+    }
+    reportProgress("done", `${skill.name} complete.`, 1);
+    return {
+      ok: true,
+      skillId: skill.id,
+      title: `${skill.name}: ${contexts[0].title}`,
+      content,
+      format: skill.outputType,
+      sourceRefs: citations.citedSourceIds,
+      invalidSourceRefs: citations.invalidSourceIds,
+      omittedSourceIds,
+      ...(actionProposal ? { actionProposal } : {})
+    };
+  } finally {
+    activeRequestId = null;
+  }
+}
+
+function prepareSkillContexts(contexts) {
+  const maxSources = 12;
+  const maxTotalCharacters = 30000;
+  const included = [];
+  const omittedSourceIds = [];
+  let remaining = maxTotalCharacters;
+
+  for (const context of contexts) {
+    if (included.length >= maxSources || remaining <= 0) {
+      omittedSourceIds.push(context.id);
+      continue;
+    }
+    const text = String(context.text || "");
+    const allowed = Math.min(12000, remaining);
+    const truncatedText = text.slice(0, allowed);
+    included.push({
+      ...context,
+      text:
+        truncatedText.length < text.length
+          ? `${truncatedText}\n[Source truncated by context limit]`
+          : truncatedText
+    });
+    remaining -= truncatedText.length;
+  }
+  return { contexts: included, omittedSourceIds };
+}
+
+async function runWorkspaceOperation(message) {
+  const storeName = String(message.storeName || "");
+  switch (message.operation) {
+    case "put":
+      return {
+        ok: true,
+        result: await extensionWorkspaceStore.put(storeName, message.record)
+      };
+    case "get":
+      return {
+        ok: true,
+        result: await extensionWorkspaceStore.get(storeName, message.id)
+      };
+    case "getAll":
+      return {
+        ok: true,
+        result: await extensionWorkspaceStore.getAll(storeName)
+      };
+    case "delete":
+      await extensionWorkspaceStore.delete(storeName, message.id);
+      return { ok: true };
+    case "clearAll":
+      await extensionWorkspaceStore.clearAll();
+      return { ok: true };
+    case "applyRetention":
+      await extensionWorkspaceStore.applyRetention(message.policy);
+      return { ok: true };
+    default:
+      throw new Error("Unsupported workspace operation.");
+  }
+}
+
+function normalizeChatMessages(messages) {
+  if (!Array.isArray(messages)) {
+    return [];
+  }
+
+  const normalized = messages
+    .slice(-12)
+    .map((message) => ({
+      role: message?.role === "assistant" ? "assistant" : "user",
+      text: String(message?.text || "").trim().slice(0, 12000),
+      imageDataUrl:
+        typeof message?.imageDataUrl === "string" &&
+        /^data:image\/(?:png|jpe?g|webp);base64,/i.test(message.imageDataUrl)
+          ? message.imageDataUrl
+          : ""
+    }))
+    .filter((message) => message.text || message.imageDataUrl);
+
+  let remainingImageChars = 6_000_000;
+  for (let index = normalized.length - 1; index >= 0; index -= 1) {
+    const imageLength = normalized[index].imageDataUrl.length;
+    if (!imageLength) continue;
+    if (imageLength > remainingImageChars) {
+      normalized[index].imageDataUrl = "";
+      continue;
+    }
+    remainingImageChars -= imageLength;
+  }
+
+  while (normalized[0]?.role === "assistant") {
+    normalized.shift();
+  }
+  return normalized;
+}
+
+function toOpenAIChatMessage({ role, text, imageDataUrl }) {
+  if (!imageDataUrl || role !== "user") {
+    return { role, content: text };
+  }
+
+  return {
+    role,
+    content: [
+      { type: "text", text: text || "Describe and help with this image." },
+      { type: "image_url", image_url: { url: imageDataUrl } }
+    ]
+  };
+}
+
+async function consumePlainTextStream(
+  stream,
+  engine,
+  taskId,
+  partialField = "chatText"
+) {
+  let content = "";
+  let lastReportAt = 0;
+  let timedOut = false;
+  const timeoutId = setTimeout(() => {
+    timedOut = true;
+    try {
+      engine?.interruptGenerate?.();
+    } catch {
+      // The timeout result below remains actionable.
+    }
+  }, 60000);
+
+  try {
+    for await (const chunk of stream) {
+      throwIfCancelled(taskId);
+      content += chunk?.choices?.[0]?.delta?.content || "";
+      const now = Date.now();
+      if (content && now - lastReportAt >= 80) {
+        lastReportAt = now;
+        reportPartial({ [partialField]: content });
+      }
+      if (timedOut) {
+        break;
+      }
+    }
+  } catch (error) {
+    if (!timedOut || !content.trim()) {
+      throw error;
+    }
+  } finally {
+    clearTimeout(timeoutId);
+  }
+
+  const reply = content.trim();
+  if (!reply) {
+    throw new Error(
+      timedOut
+        ? "The chat timed out before producing an answer."
+        : "The model returned an empty chat response."
+    );
+  }
+  reportPartial({ [partialField]: reply });
+  return reply;
 }
 
 async function deleteLocalModel({ requestId, modelId }) {
@@ -1544,7 +1907,9 @@ function finalizeAnalysisResult(
       requiredAnswerCount: question.requiredAnswerCount,
       wasOcrEdited: sourceQuality.userCorrected === true,
       questionQuality: sourceQuality.questionQuality,
-      analyzeAnyway: sourceQuality.analyzeAnyway === true
+      analyzeAnyway: sourceQuality.analyzeAnyway === true,
+      provider: sourceQuality.provider,
+      imageDirect: sourceQuality.imageDirect === true
     })
   }));
   const primary = questions[0] || result;
@@ -2372,12 +2737,12 @@ async function cropSubImage(imageDataUrl, bbox) {
 }
 
 async function runOpenAIImageAnalysis(imageDataUrl, sourceQuality = {}) {
-  const maxTokens = sourceQuality.mode === "quick" ? 700 : 1100;
+  const maxTokens = sourceQuality.mode === "quick" ? 1200 : 1800;
   const messages = [
     {
       role: "system",
       content:
-        "You are QuizBuddy AI, a careful learning tutor. Read the provided question image directly, solve every visible question, and return valid JSON only. Use the dominant language of the question image for user-facing answer fields."
+        "You are QuizBuddy AI, a careful learning tutor. Read only the provided cropped image, solve every question actually visible inside it, and return valid JSON only. Never infer or invent adjacent questions outside the crop. Use the dominant language of the question image for user-facing answer fields."
     },
     {
       role: "user",
@@ -2410,6 +2775,7 @@ async function runOpenAIImageAnalysis(imageDataUrl, sourceQuality = {}) {
     activeRequestId
   );
   let content = response?.choices?.[0]?.message?.content || "";
+  const firstFinishReason = response?.choices?.[0]?.finish_reason || "";
   logRawAIResponse("analysis-image", content);
 
   reportProgress("parse", "Checking the AI response...", 0.9);
@@ -2419,7 +2785,11 @@ async function runOpenAIImageAnalysis(imageDataUrl, sourceQuality = {}) {
     trustModelSelections: true
   });
 
-  if (parsed.parseStatus === "fallback" || parsed.questions.some(isUnknownQuestion)) {
+  if (
+    firstFinishReason === "length" ||
+    parsed.parseStatus !== "parsed" ||
+    parsed.questions.some(isUnknownQuestion)
+  ) {
     reportProgress(
       "webllm",
       "The API response was not usable JSON. Retrying image analysis...",
@@ -2456,11 +2826,12 @@ async function runOpenAIImageAnalysis(imageDataUrl, sourceQuality = {}) {
     );
     content = retryResponse?.choices?.[0]?.message?.content || "";
     logRawAIResponse("analysis-image-retry", content);
-    parsed = parseAIResult(content, "", {
+    const retryParsed = parseAIResult(content, "", {
       requestedMode: sourceQuality.mode,
       userSelectedAnswer: sourceQuality.userSelectedAnswer,
       trustModelSelections: true
     });
+    parsed = selectMoreReliableAIResult(parsed, retryParsed);
   }
 
   return finalizeAnalysisResult(parsed, parsed.questionCount || 1, {
@@ -2469,6 +2840,23 @@ async function runOpenAIImageAnalysis(imageDataUrl, sourceQuality = {}) {
     questionQuality: null,
     imageDirect: true
   });
+}
+
+function selectMoreReliableAIResult(current, candidate) {
+  const score = (result) => {
+    const statusScore =
+      result.parseStatus === "parsed"
+        ? 100
+        : result.parseStatus === "recovered"
+          ? 50
+          : 0;
+    const usableQuestions = result.questions.filter(
+      (question) => !isUnknownQuestion(question)
+    ).length;
+    return statusScore + usableQuestions * 10 + result.questionCount;
+  };
+
+  return score(candidate) > score(current) ? candidate : current;
 }
 
 function buildImageDirectAnalysisPrompt({
@@ -2532,6 +2920,7 @@ Rules:
 - Return valid JSON only. No markdown, no comments, no trailing commas, no text outside JSON, and no <think> tags.
 - Read all visible text and diagrams from the image itself.
 - Return one questions[] item for every visible question in order.
+- Do not infer, continue, or invent questions that are outside the cropped image. If exactly one question is visible, return exactly one questions[] item.
 - For multiple-choice input, answer using only visible options from the image.
 - For direct-answer input with no choices, set answerSelections to [] and answerLabel to "".
 - For multiple-select questions, include every selected answer in answerSelections.

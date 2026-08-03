@@ -1,21 +1,21 @@
-# QuizBuddy AI
+# QuizBuddy Labs
 
-Privacy-first Chrome extension for answering cropped questions with local OCR,
-browser-based WebLLM inference, or an optional OpenAI-compatible API provider.
+Local-first Chrome Knowledge Copilot for capturing, transforming, researching,
+and learning from web content with browser-based WebLLM inference or an
+optional OpenAI-compatible API provider.
 
-QuizBuddy AI captures a user-selected region of the visible tab, extracts
-Vietnamese or English text with Tesseract.js, and can use a selected local
-Qwen model to produce an answer and learning explanation. Users can also opt
-into an OpenAI-compatible API provider. In API mode, QuizBuddy can either send
-OCR text or send the cropped image directly to a vision-capable API model. The
-project operates without its own backend, account system, analytics, or
+QuizBuddy Labs can capture selected text, readable page content, or a cropped
+screen region. It runs built-in transformation and research skills with a
+selected local Qwen model or an optional OpenAI-compatible API provider. The
+project operates without its own backend, account system, remote analytics, or
 server-side history.
 
 ## Status
 
-QuizBuddy AI is an MVP under active development. The crop, OCR, local model,
-optional API provider, image-direct API analysis, result rendering, follow-up,
-practice, and reliability flows are implemented.
+QuizBuddy Labs is under active development. Select and Transform, local
+workspaces, research skills, explicit memories, declarative custom skills,
+review-only action proposals, quiz, OCR, chat, and both AI provider flows are
+implemented.
 
 ## Highlights
 
@@ -25,6 +25,16 @@ practice, and reliability flows are implemented.
 - Local WebGPU provider for offline inference after model setup
 - Optional OpenAI-compatible API provider
 - API-only direct cropped-image analysis for vision-capable models
+- Session chat workspace with streaming replies and API vision attachments
+- Capture selected text, readable page content, or the last quiz crop
+- Explain, summarize, extract, rewrite, translate, ask, and quiz skills
+- Multi-source comparison, contradiction, research brief, and decision matrix skills
+- Extension-origin IndexedDB Library with search, pin, rename, duplicate, and delete
+- JSON import/export, Markdown export, and configurable local retention
+- Explicit local profile and inspectable, editable, disableable memories
+- Declarative custom skills without third-party executable code
+- Review-only checklist action proposals that cannot operate websites
+- Local-only privacy-safe product metrics
 - Browser-local Vietnamese and English OCR
 - Local Math & Formula OCR (via ONNX runtime and transformers.js) to recognize complex equations
 - Safe, isolated LaTeX math rendering inside Shadow DOM using KaTeX with inline base64 fonts
@@ -54,7 +64,7 @@ practice, and reliability flows are implemented.
 - `Alt+Shift+Q` crop shortcut
 - Full answer text instead of invented A/B/C/D labels
 - Closed Shadow DOM UI isolation
-- No QuizBuddy backend, account, analytics, or persistent study history
+- No QuizBuddy backend, account, remote analytics, or server-side history
 
 ## Requirements
 
@@ -87,7 +97,7 @@ The repository root is source code. Always load `dist/` in Chrome.
 ## Usage
 
 1. Open a regular `http://` or `https://` page containing a question.
-2. Click the QuizBuddy AI toolbar icon or floating icon.
+2. Click the QuizBuddy Labs toolbar icon or floating icon.
 3. Choose a provider:
    - **Local WebGPU (No Internet)** for browser-local inference after model
      download.
@@ -104,6 +114,8 @@ The repository root is source code. Always load `dist/` in Chrome.
    In API image-direct mode, the crop is sent directly to the API model and the
    OCR editor is skipped.
 9. Review the suggested answer and explanation.
+10. Open the **Chat** tab for a general conversation. Text chat works with the
+    selected local or API model; image attachments require an API vision model.
 
 Use **Quick Answer** for a compact result or **Learning Mode** for option
 analysis, core knowledge, study notes, and practice generation. Select a
@@ -139,7 +151,7 @@ allows changing the shortcut at `chrome://extensions/shortcuts`.
 
 Drag the floating icon toward the right edge to collapse it into a small edge
 handle. Click the handle to expand the icon, then click the icon to open
-QuizBuddy AI. A normal click still opens the sidebar, while a completed drag
+QuizBuddy Labs. A normal click still opens the sidebar, while a completed drag
 does not trigger it accidentally. The docked state is saved in Chrome storage.
 
 ## AI Providers
@@ -171,7 +183,7 @@ Qwen2.5 1.5B for moderate reasoning on constrained devices. The recommended
 Accurate profile uses Qwen2.5 3B and about 2.5 GB of GPU memory for materially
 stronger reasoning. High Accuracy uses Qwen2.5 7B and Max Accuracy uses Qwen3
 8B for higher-quality local reasoning on devices with about 5.1 GB to 5.7 GB
-of available GPU memory. QuizBuddy AI never starts a
+of available GPU memory. QuizBuddy Labs never starts a
 model download automatically. The user must select a model and click its
 download button. Selected model weights are then downloaded from the official
 MLC model repository and cached by WebLLM in Chrome Cache Storage for the
@@ -193,7 +205,9 @@ extension or clearing its site data may remove the cached model.
 
 ```text
 Content Script
-  - Closed Shadow DOM widget and sidebar
+  - Closed Shadow DOM Capture, Quiz, Chat, and Library workspace
+  - Selected-text and readable-page extraction
+  - Skill controls, source verification, personalization, and local Library UI
   - Crop selection overlay
   - Provider, local model, API, OCR language, editable text, and image-direct controls
   - Mode, subject, answer-check, reliability, practice, and notes UI
@@ -212,11 +226,12 @@ Offscreen Document
   - AI JSON validation, reliability scoring, and practice generation
   - Question-quality checks, source traces, and grounded follow-up inference
   - Temporary full-screenshot memory and device diagnostics
+  - Generic skill runtime and extension-origin IndexedDB workspace repository
 ```
 
 ## Privacy
 
-In **Local WebGPU** mode, QuizBuddy AI does not send question screenshots, OCR
+In **Local WebGPU** mode, QuizBuddy Labs does not send question screenshots, OCR
 text, prompts, answers, follow-up messages, or practice requests to an external
 AI inference API. Local model inference runs in the browser through WebGPU after
 the selected model weights are downloaded.
@@ -230,15 +245,21 @@ to the configured API endpoint:
 - API follow-up and practice requests send the current question context and
   prompt content needed for that task.
 
-QuizBuddy AI itself does not:
+QuizBuddy Labs itself does not:
 
 - Operate a backend
 - Proxy API requests through a QuizBuddy server
-- Store question history
+- Store workspace data on a QuizBuddy server
 - Persist screenshots, practice questions, or session study notes
 - Persist follow-up messages or analysis results
 - Require login
 - Include analytics or tracking
+
+Saved workspaces, contexts, artifacts, memories, custom skills, and local-only
+usage counters are stored in IndexedDB under the extension origin. Users can
+choose session-only, 7-day, 30-day, or unlimited retention, export their data,
+or delete all local workspace data. Original screenshots are not persisted
+with saved artifacts; crop text and source metadata are retained instead.
 
 API keys and provider settings are stored in Chrome local storage for the
 extension. The first local model setup downloads model artifacts from the
@@ -260,7 +281,7 @@ page-global property.
 This reduces accidental conflicts and simple DOM fingerprinting, but no
 extension that displays an overlay inside a webpage can guarantee that it is
 undetectable. A page can observe generic DOM insertion, user input, layout,
-focus, or resource pressure. QuizBuddy AI does not attempt to bypass proctoring,
+focus, or resource pressure. QuizBuddy Labs does not attempt to bypass proctoring,
 anti-cheat systems, access controls, or website policy enforcement.
 
 ## Resource Lifecycle
@@ -493,4 +514,4 @@ licenses and model artifact details are documented in
 
 ## License
 
-QuizBuddy AI is released under the [MIT License](LICENSE).
+QuizBuddy Labs is released under the [MIT License](LICENSE).

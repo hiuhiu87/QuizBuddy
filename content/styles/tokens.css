@@ -1,0 +1,320 @@
+/* Backward compatibility aliases */
+:host {
+  --qb-bg: var(--qb-color-bg);
+  --qb-surface: var(--qb-color-surface);
+  --qb-surface-muted: var(--qb-color-surface-muted);
+  --qb-border: var(--qb-color-border);
+  --qb-border-strong: var(--qb-color-border-strong);
+  --qb-text: var(--qb-color-text);
+  --qb-text-muted: var(--qb-color-text-muted);
+  --qb-primary: var(--qb-color-primary);
+  --qb-primary-hover: var(--qb-color-primary-hover);
+  --qb-primary-soft: var(--qb-color-primary-soft);
+  --qb-radius: var(--qb-radius-md);
+  --qb-radius-sm: var(--qb-radius-sm);
+}
+
+
+:host {
+  /* ========================================
+   * COLOR — Semantic (not component-specific)
+   * ======================================== */
+  
+  /* Backgrounds */
+  --qb-color-bg: #f4f6fb;
+  --qb-color-surface: #ffffff;
+  --qb-color-surface-hover: #f8fafc;
+  --qb-color-surface-muted: #f1f5f9;
+  
+  /* Borders */
+  --qb-color-border: #dbe2ea;
+  --qb-color-border-strong: #cbd5e1;
+  --qb-color-border-focus: #818cf8;
+  --qb-color-border-error: #fca5a5;
+  
+  /* Text */
+  --qb-color-text: #172033;
+  --qb-color-text-secondary: #475569;
+  --qb-color-text-muted: #94a3b8;
+  --qb-color-text-inverse: #ffffff;
+  --qb-color-text-link: #4f46e5;
+  
+  /* Brand / Primary */
+  --qb-color-primary: #4f46e5;
+  --qb-color-primary-hover: #4338ca;
+  --qb-color-primary-active: #3730a3;
+  --qb-color-primary-soft: #eef2ff;
+  --qb-color-primary-strong: #312e81;
+  
+  /* Semantic Status */
+  --qb-color-success: #16a34a;
+  --qb-color-success-hover: #15803d;
+  --qb-color-success-soft: #dcfce7;
+  --qb-color-success-text: #166534;
+  
+  --qb-color-warning: #f59e0b;
+  --qb-color-warning-hover: #d97706;
+  --qb-color-warning-soft: #fef3c7;
+  --qb-color-warning-text: #92400e;
+  
+  --qb-color-danger: #ef4444;
+  --qb-color-danger-hover: #dc2626;
+  --qb-color-danger-soft: #fee2e2;
+  --qb-color-danger-text: #991b1b;
+  
+  --qb-color-info: #0ea5e9;
+  --qb-color-info-hover: #0284c7;
+  --qb-color-info-soft: #e0f2fe;
+  --qb-color-info-text: #075985;
+  
+  /* Overlay */
+  --qb-color-overlay: rgba(15, 23, 42, 0.32);
+  --qb-color-overlay-strong: rgba(15, 23, 42, 0.48);
+  --qb-color-overlay-modal: rgba(15, 23, 42, 0.55);
+  
+  /* ========================================
+   * TYPOGRAPHY — Fluid scale with clamp()
+   * ======================================== */
+  --qb-font-sans: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --qb-font-mono: "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
+  
+  /* Fluid type scale — scales with viewport but clamps */
+  --qb-text-xs: clamp(10px, 0.625rem + 0.1vw, 11px);
+  --qb-text-sm: clamp(12px, 0.75rem + 0.1vw, 13px);
+  --qb-text-base: clamp(13px, 0.8125rem + 0.1vw, 14px);
+  --qb-text-lg: clamp(14px, 0.875rem + 0.1vw, 15px);
+  --qb-text-xl: clamp(16px, 1rem + 0.1vw, 17px);
+  --qb-text-2xl: clamp(18px, 1.125rem + 0.15vw, 20px);
+  --qb-text-3xl: clamp(20px, 1.25rem + 0.2vw, 22px);
+  
+  --qb-lh-tight: 1.25;
+  --qb-lh-snug: 1.35;
+  --qb-lh-normal: 1.5;
+  --qb-lh-relaxed: 1.6;
+  
+  --qb-font-normal: 400;
+  --qb-font-medium: 500;
+  --qb-font-semibold: 600;
+  --qb-font-bold: 700;
+  
+  /* ========================================
+   * SPACING — 4px base unit
+   * ======================================== */
+  --qb-space-1: 4px;
+  --qb-space-2: 8px;
+  --qb-space-3: 12px;
+  --qb-space-4: 16px;
+  --qb-space-5: 20px;
+  --qb-space-6: 24px;
+  --qb-space-7: 28px;
+  --qb-space-8: 32px;
+  --qb-space-10: 40px;
+  --qb-space-12: 48px;
+  --qb-space-16: 64px;
+  
+  /* Layout-specific */
+  --qb-space-header: var(--qb-space-4);
+  --qb-space-card: var(--qb-space-4);
+  --qb-space-section: var(--qb-space-6);
+  --qb-space-inline: var(--qb-space-2);
+  
+  /* ========================================
+   * BORDER RADIUS
+   * ======================================== */
+  --qb-radius-none: 0;
+  --qb-radius-sm: 6px;
+  --qb-radius-md: 8px;
+  --qb-radius-lg: 12px;
+  --qb-radius-xl: 16px;
+  --qb-radius-2xl: 20px;
+  --qb-radius-full: 999px;
+  
+  /* Component-specific */
+  --qb-radius-button: var(--qb-radius-md);
+  --qb-radius-input: var(--qb-radius-md);
+  --qb-radius-card: var(--qb-radius-lg);
+  --qb-radius-badge: var(--qb-radius-full);
+  
+  /* ========================================
+   * SHADOWS
+   * ======================================== */
+  --qb-shadow-xs: 0 1px 2px rgba(15, 23, 42, 0.05);
+  --qb-shadow-sm: 0 1px 3px rgba(15, 23, 42, 0.08), 0 1px 2px rgba(15, 23, 42, 0.06);
+  --qb-shadow-md: 0 4px 6px -1px rgba(15, 23, 42, 0.1), 0 2px 4px -1px rgba(15, 23, 42, 0.06);
+  --qb-shadow-lg: 0 10px 15px -3px rgba(15, 23, 42, 0.1), 0 4px 6px -2px rgba(15, 23, 42, 0.05);
+  --qb-shadow-xl: 0 20px 25px -5px rgba(15, 23, 42, 0.1), 0 10px 10px -5px rgba(15, 23, 42, 0.04);
+  --qb-shadow-2xl: 0 25px 50px -12px rgba(15, 23, 42, 0.25);
+  
+  /* Component-specific */
+  --qb-shadow-button: var(--qb-shadow-sm);
+  --qb-shadow-button-hover: var(--qb-shadow-md);
+  --qb-shadow-card: var(--qb-shadow-md);
+  --qb-shadow-dropdown: var(--qb-shadow-lg);
+  --qb-shadow-modal: var(--qb-shadow-xl);
+  --qb-shadow-floating: 0 8px 24px rgba(15, 23, 42, 0.28);
+  --qb-shadow-sidebar: -16px 0 48px rgba(15, 23, 42, 0.16);
+  
+  /* ========================================
+   * TRANSITIONS
+   * ======================================== */
+  --qb-transition-fast: 100ms ease;
+  --qb-transition-base: 180ms ease;
+  --qb-transition-slow: 280ms ease;
+  --qb-transition-spring: 250ms cubic-bezier(0.34, 1.56, 0.64, 1);
+  
+  /* ========================================
+   * Z-INDEX SCALE
+   * ======================================== */
+  --qb-z-base: 0;
+  --qb-z-dropdown: 100;
+  --qb-z-sticky: 200;
+  --qb-z-overlay: 300;
+  --qb-z-modal: 400;
+  --qb-z-toast: 500;
+  --qb-z-tooltip: 600;
+  --qb-z-floating: 2147483645;
+  --qb-z-sidebar: 2147483646;
+  --qb-z-crop: 2147483647;
+  
+  /* ========================================
+   * SIDEBAR
+   * ======================================== */
+  --qb-sidebar-width: 380px;
+  --qb-sidebar-width-min: 340px;
+  --qb-sidebar-width-max: 92vw;
+  --qb-sidebar-header-height: 72px;
+  --qb-sidebar-tab-height: 44px;
+  
+  /* ========================================
+   * FOCUS RING (consistent everywhere)
+   * ======================================== */
+  --qb-focus-ring: 0 0 0 3px var(--qb-color-primary-soft);
+  --qb-focus-ring-offset: 1px;
+  
+  /* ========================================
+   * DARK MODE — Override via [data-qb-theme="dark"]
+   * ======================================== */
+}
+
+/* Dark mode tokens — applied via host attribute */
+:host([data-qb-theme="dark"]) {
+  --qb-color-bg: #0b1120;
+  --qb-color-surface: #111827;
+  --qb-color-surface-hover: #182235;
+  --qb-color-surface-muted: #1e293b;
+  
+  --qb-color-border: #2a3850;
+  --qb-color-border-strong: #3a4a63;
+  --qb-color-border-focus: #818cf8;
+  --qb-color-border-error: #7f1d1d;
+  
+  --qb-color-text: #f1f5f9;
+  --qb-color-text-secondary: #cbd5e1;
+  --qb-color-text-muted: #64748b;
+  --qb-color-text-inverse: #0f172a;
+  --qb-color-text-link: #a5b4fc;
+  
+  --qb-color-primary: #818cf8;
+  --qb-color-primary-hover: #a5b4fc;
+  --qb-color-primary-active: #6366f1;
+  --qb-color-primary-soft: #242b56;
+  --qb-color-primary-strong: #c7d2fe;
+  
+  --qb-color-success: #22c55e;
+  --qb-color-success-hover: #4ade80;
+  --qb-color-success-soft: #14532d;
+  --qb-color-success-text: #bbf7d0;
+  
+  --qb-color-warning: #fbbf24;
+  --qb-color-warning-hover: #fcd34d;
+  --qb-color-warning-soft: #422006;
+  --qb-color-warning-text: #fde68a;
+  
+  --qb-color-danger: #f87171;
+  --qb-color-danger-hover: #fca5a5;
+  --qb-color-danger-soft: #450a0a;
+  --qb-color-danger-text: #fecaca;
+  
+  --qb-color-info: #38bdf8;
+  --qb-color-info-hover: #7dd3fc;
+  --qb-color-info-soft: #0c4a6e;
+  --qb-color-info-text: #bae6fd;
+  
+  --qb-color-overlay: rgba(0, 0, 0, 0.45);
+  --qb-color-overlay-strong: rgba(0, 0, 0, 0.6);
+  --qb-color-overlay-modal: rgba(0, 0, 0, 0.7);
+  
+  --qb-shadow-floating: 0 8px 26px rgba(0, 0, 0, 0.5);
+  --qb-shadow-sidebar: -18px 0 54px rgba(0, 0, 0, 0.42);
+  --qb-shadow-card: 0 4px 6px -1px rgba(0, 0, 0, 0.3), 0 2px 4px -1px rgba(0, 0, 0, 0.2);
+  --qb-shadow-dropdown: 0 10px 15px -3px rgba(0, 0, 0, 0.4), 0 4px 6px -2px rgba(0, 0, 0, 0.2);
+  --qb-shadow-modal: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+  
+  --qb-focus-ring: 0 0 0 3px rgba(129, 140, 248, 0.35);
+}
+
+/* ========================================
+ * UTILITY CLASSES (use sparingly, prefer component styles)
+ * ======================================== */
+
+.qb-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.qb-focus-visible:focus-visible {
+  outline: none;
+  box-shadow: var(--qb-focus-ring);
+  outline-offset: var(--qb-focus-ring-offset);
+}
+
+.qb-transition-base {
+  transition: background-color var(--qb-transition-base),
+              border-color var(--qb-transition-base),
+              color var(--qb-transition-base),
+              box-shadow var(--qb-transition-base),
+              transform var(--qb-transition-base);
+}
+
+.qb-hidden {
+  display: none !important;
+}
+
+.qb-flex-center {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.qb-flex-between {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.qb-truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qb-truncate-2 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.qb-truncate-3 {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}

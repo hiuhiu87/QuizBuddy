@@ -22,10 +22,18 @@ test("content host exposes no public DOM id or named window flag", async () => {
 });
 
 test("content CSS resets the shadow host", async () => {
+  const source = await readFile("content/content.js", "utf8");
   const css = await readFile("content/content.css", "utf8");
 
   assert.match(css, /:host\s*\{[\s\S]*all:\s*initial;/);
   assert.match(css, /:host \*,[\s\S]*box-sizing:\s*border-box;/);
+  assert.doesNotMatch(css, /@import/);
+  assert.match(source, /import designTokenStyles from "\.\/styles\/tokens\.css"/);
+  assert.match(source, /import primitiveStyles from "\.\/styles\/primitives\.css"/);
+  assert.match(
+    source,
+    /\[\s*designTokenStyles,\s*primitiveStyles,\s*extensionStyles,\s*katexStyles\s*\]\.join/
+  );
 });
 
 test("content UI supports a persisted system-aware dark theme", async () => {
@@ -135,7 +143,45 @@ test("direct image input is API-only and falls back to OCR for local provider", 
   assert.match(offscreen, /analysisInputMode === "image"/);
   assert.match(offscreen, /provider !== "openai"/);
   assert.match(offscreen, /runOpenAIImageAnalysis/);
+  assert.match(offscreen, /If exactly one question is visible, return exactly one/);
   assert.match(offscreen, /trustModelSelections: true/);
+});
+
+test("sidebar exposes Capture, Quiz, Chat, and Library workspaces", async () => {
+  const content = await readFile("content/content.js", "utf8");
+  const background = await readFile("background.js", "utf8");
+  const offscreen = await readFile("offscreen.js", "utf8");
+
+  assert.match(content, /data-workspace-tab="capture"[\s\S]*Capture/);
+  assert.match(content, /data-workspace-tab="quick"[\s\S]*Quiz/);
+  assert.match(content, /data-workspace-tab="chat"[\s\S]*Chat/);
+  assert.match(content, /data-workspace-tab="library"[\s\S]*Library/);
+  assert.match(content, /type:\s*"QB_RUN_SKILL"/);
+  assert.match(content, /type:\s*"QB_WORKSPACE_OP"/);
+  assert.match(content, /qb-capture-selection/);
+  assert.match(content, /qb-capture-page/);
+  assert.match(content, /qb-capture-last-crop/);
+  assert.match(content, /qb-retention-policy/);
+  assert.match(content, /Accept Draft/);
+  assert.match(content, /No website action was executed/);
+  assert.match(content, /qb-sidebar-resize-handle/);
+  assert.match(content, /SIDEBAR_WIDTH_KEY = "qbSidebarWidth"/);
+  assert.match(content, /function resizeSidebarWithKeyboard/);
+  assert.match(content, /replaceChildren\(renderMarkdown\(text\)\)/);
+  assert.match(content, /parseMarkdownBlocks/);
+  assert.match(content, /class="qb-chat-file-input"[\s\S]*accept="image\/png,image\/jpeg,image\/webp"/);
+  assert.match(content, /chatInput\.addEventListener\("paste", onChatPaste\)/);
+  assert.match(content, /clipboardData\?\.items/);
+  assert.match(content, /attachChatImage\(file, "Pasted image"\)/);
+  assert.match(content, /type:\s*"QB_CHAT_LOCAL"/);
+  assert.match(content, /pendingChatImage && selectedProvider !== "openai"/);
+  assert.match(background, /QB_OFFSCREEN_CHAT/);
+  assert.match(background, /QB_OFFSCREEN_WORKSPACE_OP/);
+  assert.match(offscreen, /function normalizeChatMessages/);
+  assert.match(offscreen, /extensionWorkspaceStore/);
+  assert.match(offscreen, /Image attachments require the OpenAI Compatible API provider/);
+  assert.match(offscreen, /partialField = "chatText"/);
+  assert.match(offscreen, /runKnowledgeSkill/);
 });
 
 test("content releases local resources after use and when the page closes", async () => {
@@ -193,9 +239,12 @@ test("mode and subject preferences are stored without persisting study data", as
 });
 
 test("true re-crop uses the existing offscreen screenshot", async () => {
+  const content = await readFile("content/content.js", "utf8");
   const background = await readFile("background.js", "utf8");
   const offscreen = await readFile("offscreen.js", "utf8");
 
+  assert.match(content, /image\.naturalWidth\s*\/\s*bounds\.width/);
+  assert.match(content, /coordinateSpace:\s*"image-pixels"/);
   assert.match(background, /QB_RECROP_LAST_SCREENSHOT/);
   assert.match(background, /QB_OFFSCREEN_RECROP_LAST_SCREENSHOT/);
   assert.match(offscreen, /screenshotDataUrl: lastScreenshotDataUrl/);

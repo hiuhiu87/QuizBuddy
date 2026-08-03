@@ -111,6 +111,42 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message.type === "QB_CHAT_LOCAL") {
+    handleLocalTask(message, sender, "QB_OFFSCREEN_CHAT", "chat")
+      .then(sendResponse)
+      .catch((error) => {
+        sendResponse({
+          ok: false,
+          error: error.message || "Could not complete the chat response."
+        });
+      });
+    return true;
+  }
+
+  if (message.type === "QB_RUN_SKILL") {
+    handleLocalTask(message, sender, "QB_OFFSCREEN_RUN_SKILL", "skill")
+      .then(sendResponse)
+      .catch((error) => {
+        sendResponse({
+          ok: false,
+          error: error.message || "Could not run the selected skill."
+        });
+      });
+    return true;
+  }
+
+  if (message.type === "QB_WORKSPACE_OP") {
+    handleWorkspaceOperation(message)
+      .then(sendResponse)
+      .catch((error) => {
+        sendResponse({
+          ok: false,
+          error: error.message || "Could not access the local workspace."
+        });
+      });
+    return true;
+  }
+
   if (message.type === "QB_CANCEL_TASK") {
     handleCancelTask(message, sender)
       .then(sendResponse)
@@ -216,6 +252,14 @@ async function handleGetModelStatus(message) {
       await closeOffscreenDocument();
     }
   }
+}
+
+async function handleWorkspaceOperation(message) {
+  await ensureOffscreenDocument();
+  return chrome.runtime.sendMessage({
+    ...message,
+    type: "QB_OFFSCREEN_WORKSPACE_OP"
+  });
 }
 
 async function handleReleaseResources() {

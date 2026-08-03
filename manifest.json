@@ -1,9 +1,9 @@
 {
   "manifest_version": 3,
-  "name": "QuizBuddy AI",
+  "name": "QuizBuddy Labs",
   "version": "0.9.6",
   "minimum_chrome_version": "116",
-  "description": "Crop questions and answer them locally with OCR and WebLLM.",
+  "description": "A local-first Knowledge Copilot for capturing, transforming, researching, and learning from web content.",
   "permissions": [
     "activeTab",
     "tabs",
@@ -36,7 +36,7 @@
     "128": "assets/icon-128.png"
   },
   "action": {
-    "default_title": "QuizBuddy AI",
+    "default_title": "QuizBuddy Labs",
     "default_icon": {
       "16": "assets/icon-16.png",
       "32": "assets/icon-32.png",

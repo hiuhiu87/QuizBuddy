@@ -47,6 +47,19 @@ test("fallback parse forces low reliability", () => {
   );
 });
 
+test("API reliability uses provider-specific and recovered-response reasons", () => {
+  const result = calculateOverallReliability({
+    aiConfidence: "medium",
+    parseStatus: "recovered",
+    provider: "openai",
+    imageDirect: true
+  });
+
+  assert.ok(result.reasons.some((reason) => /API model confidence/.test(reason)));
+  assert.ok(result.reasons.some((reason) => /without local OCR/.test(reason)));
+  assert.ok(result.reasons.some((reason) => /were recovered/.test(reason)));
+});
+
 test("edited OCR adds an explicit reason", () => {
   const result = calculateOverallReliability({
     aiConfidence: "high",
